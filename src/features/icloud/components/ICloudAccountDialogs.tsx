@@ -170,7 +170,7 @@ export function AddICloudAccountDialog({ onClose, onCreated, onChanged }: {
         <label><span>Cookie · {t('可选')}</span><textarea value={cookies} rows={7}
           required={!icloudEmail.trim() && !appPassword.trim() && !appleAccountLogin}
           onChange={(event) => setCookies(event.target.value)} placeholder="X-APPLE-WEBAUTH-TOKEN=...; X-APPLE-ID-SESSION-ID=..." /></label>
-        <p className="icloud-form-note"><EyeOff size={15} aria-hidden="true" />{t('Cookie 仅在同步、创建或管理隐藏邮箱时需要。')}</p>
+        <p className="icloud-form-note"><EyeOff size={15} aria-hidden="true" />{t('Cookie 仅用于管理隐藏邮箱。')}</p>
         <fieldset className="icloud-optional-credentials">
           <legend><KeyRound size={16} aria-hidden="true" />{t('主邮箱收信')}<small>{t('可选')}</small></legend>
           <div className="icloud-app-password-fields">
