@@ -160,6 +160,7 @@ export const enICloud: Record<string, string> = {
     'Credentials are encrypted in the Worker and are not returned after saving.',
   'Cookie 仅在同步、创建或管理隐藏邮箱时需要。':
     'Cookies are only required to sync, create, or manage Hide My Email addresses.',
+  'Cookie 仅用于管理隐藏邮箱。': 'Cookies are only used to manage Hide My Email addresses.',
   '主邮箱收信': 'Primary mailbox',
   '只使用 iCloud 主邮箱时，只需填写邮箱和应用专用密码，无需 Cookie。':
     'For primary iCloud mail only, enter the email address and app-specific password; cookies are not required.',
