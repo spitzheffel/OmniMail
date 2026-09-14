@@ -10,12 +10,8 @@ import {
   EXTERNAL_MAIL_INDEX_MIGRATION,
   EXTERNAL_MAIL_INDEX_RECOVERY,
 } from './schema-migration-external-mail'
-import {
-  ICLOUD_APPLE_ACCOUNT_MIGRATION,
-  ICLOUD_APPLE_ACCOUNT_RECOVERY,
-} from './schema-migration-icloud-apple'
-const ICLOUD_MIGRATION = '0021_icloud_accounts.sql'
-const CONSISTENCY_MIGRATION = '0022_consistency_guards.sql'
+import { ICLOUD_APPLE_ACCOUNT_MIGRATION, ICLOUD_APPLE_ACCOUNT_RECOVERY } from './schema-migration-icloud-apple'
+const ICLOUD_MIGRATION = '0021_icloud_accounts.sql'; const CONSISTENCY_MIGRATION = '0022_consistency_guards.sql'
 const LINUX_DO_MAIL_MIGRATION = '0023_linux_do_mail_accounts.sql'
 const LINUX_DO_MAIL_OUTBOUND_MIGRATION = '0024_linux_do_mail_outbound.sql'
 const GMAIL_MIGRATION = '0025_gmail_imap.sql'

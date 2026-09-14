@@ -228,7 +228,7 @@ describe('D1 migration check', () => {
 
     await ensureSchema(fixture.db)
 
-    expect(fixture.applied.size).toBe(36)
+    expect(fixture.applied.size).toBe(37)
     expect(fixture.batches[0]).toHaveLength(18)
   })
 
