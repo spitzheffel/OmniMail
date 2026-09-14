@@ -1,4 +1,4 @@
-export const ICLOUD_APPLE_ACCOUNT_MIGRATION = '0036_icloud_apple_account.sql'
+export const ICLOUD_APPLE_ACCOUNT_MIGRATION = '0038_icloud_apple_account.sql'
 
 export const ICLOUD_APPLE_ACCOUNT_RECOVERY = {
   name: ICLOUD_APPLE_ACCOUNT_MIGRATION,

@@ -143,6 +143,7 @@ describe('D1 migration check', () => {
     expect(fixture.applied.has('0033_naver_mail_imap.sql')).toBe(true)
     expect(fixture.applied.has('0034_yandex_mail_imap.sql')).toBe(true)
     expect(fixture.applied.has('0037_mail_notification_versions.sql')).toBe(true)
+    expect(fixture.applied.has('0035_external_mail_indexes.sql')).toBe(true)
     expect(fixture.applied.has('0038_icloud_apple_account.sql')).toBe(true)
   })
 
@@ -191,6 +192,7 @@ describe('D1 migration check', () => {
     expect(fixture.applied.has('0033_naver_mail_imap.sql')).toBe(true)
     expect(fixture.applied.has('0034_yandex_mail_imap.sql')).toBe(true)
     expect(fixture.applied.has('0037_mail_notification_versions.sql')).toBe(true)
+    expect(fixture.applied.has('0035_external_mail_indexes.sql')).toBe(true)
     expect(fixture.applied.has('0038_icloud_apple_account.sql')).toBe(true)
     expect(fixture.prepare).toHaveBeenCalledWith(
       "ALTER TABLE device_sessions ADD COLUMN scopes TEXT NOT NULL DEFAULT '*'",
