@@ -17,10 +17,19 @@ export class ICloudRemoteError extends Error {
     readonly status: number,
     message: string,
     readonly definitive = false,
+    readonly code = '',
   ) {
     super(message)
   }
 }
+
+export const APPLE_ACCOUNT_ERROR_CODES = {
+  auth: 'apple_account_auth_failed',
+  limit: 'apple_account_hme_limit',
+  api: 'apple_account_api_failed',
+  missing: 'apple_account_session_missing',
+} as const
+
 
 interface ValidateResponse {
   webservices?: {

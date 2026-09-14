@@ -377,7 +377,7 @@ Import a repository**，选择你的 OmniMail 仓库：
 | 项目 | 值 |
 | --- | --- |
 | Project name | `omni-mail` |
-| Production branch | `main` |
+| Production branch | `develop` |
 | Root directory | `/` |
 | Build command | `npm run build` |
 | Deploy command | `npm run deploy` |
@@ -427,7 +427,7 @@ Worker 默认名称是 `omni-mail`，代码中的 D1 绑定名始终是 `DB`。�
 `/api/*` 优先交给 Worker 脚本，其余路径由 Static Assets 提供；未匹配的浏览器
 导航会回退到 `index.html`，因此 React SPA 刷新不会出现 404。
 
-Cloudflare Workers Builds 会在 `main` 更新后自动拉取、构建并部署，不需要在
+Cloudflare Workers Builds 会在 `develop` 更新后自动拉取、构建并部署，不需要在
 GitHub Actions 中重复配置 Cloudflare API Token。GitHub Actions 只负责运行测试、
 类型检查和部署预检。
 
@@ -458,9 +458,10 @@ Worker 文件，剩余路径仍会匹配 `*` 并正常部署。Build watch paths
 #### 后续同步上游更新
 
 原仓库发布更新后，在自己的 Fork 页面选择 **Sync fork → Update branch**。GitHub
-会把上游提交同步到 Fork 的 `main`；Workers Builds 检测到新提交后会自动运行上述
-构建、D1 迁移和部署命令。存在冲突时，先按 GitHub 提示创建 Pull Request 并人工解决，
-不要强制覆盖包含自定义修改的生产分支。
+会把上游提交同步到 Fork 的 `main`；确认测试通过后，将 `main` 合并到 `develop`，
+再由 Workers Builds 运行上述构建、D1 迁移和部署命令。功能改动请从 `develop` 创建
+`feature/*` 分支并通过 Pull Request 合并。存在冲突时在 `develop` 解决，不要强制覆盖
+包含自定义改动的分支。
 
 ### 3. 配置 Worker
 

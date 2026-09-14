@@ -1,11 +1,12 @@
-import { AlertCircle, Check, LoaderCircle, Plus, RefreshCw, Trash2 } from 'lucide-react'
+import { AlertCircle, Check, LoaderCircle, Plus, RefreshCw, ShieldCheck, Trash2 } from 'lucide-react'
 import { flushSync } from 'react-dom'
 import { useEffect, useEffectEvent, useRef, useState, type FormEvent } from 'react'
 import { api, type ICloudAccount, type ICloudAlias } from '../../../shared/api'
 import { errorMessage } from '../../../shared/api/errorMessage'
 import { t } from '../../../shared/i18n'
 
-const MAX_ALIASES = 5
+const LEGACY_MAX_ALIASES = 5
+const APPLE_ACCOUNT_MAX_ALIASES = 25
 const SUCCESS_HOLD_MS = 320
 const labelPresets = ['购物', '社交', '订阅', '工作', '临时使用'] as const
 type CreationState = 'idle' | 'queued' | 'creating' | 'success' | 'error'
@@ -46,8 +47,12 @@ export function ICloudAliasBatchForm({ account, close, onCreated }: {
   const [progress, setProgress] = useState({ completed: 0, total: 0 })
   const previewVersions = useRef(new Map<string, number>())
   const draftsRoot = useRef<HTMLDivElement>(null)
+  const usesAppleAccount = Boolean(account.hasAppleAccount)
+  const maxAliases = usesAppleAccount
+    ? (account.hasCookies ? APPLE_ACCOUNT_MAX_ALIASES : 20)
+    : LEGACY_MAX_ALIASES
   const previewBusy = drafts.some((draft) => draft.loading)
-  const ready = drafts.every((draft) => draft.email && draft.previewId && !draft.loading)
+  const ready = drafts.every((draft) => (usesAppleAccount || (draft.email && draft.previewId)) && !draft.loading)
   const activeDraft = drafts.find((draft) => draft.id === activeDraftId) || drafts[0]
 
   function updateDraft(id: string, update: Partial<AliasDraft>) {
@@ -75,6 +80,7 @@ export function ICloudAliasBatchForm({ account, close, onCreated }: {
   const previewInitialDraft = useEffectEvent(() => previewDraft(initialDraft.id))
 
   useEffect(() => {
+    if (usesAppleAccount) return
     const previewVersionsAtMount = previewVersions.current
     const timer = window.setTimeout(() => void previewInitialDraft(), 0)
     return () => {
@@ -83,10 +89,10 @@ export function ICloudAliasBatchForm({ account, close, onCreated }: {
         previewVersionsAtMount.set(id, version + 1)
       }
     }
-  }, [])
+  }, [usesAppleAccount])
 
   function addDraft() {
-    if (drafts.length >= MAX_ALIASES || previewBusy || creating) return
+    if (drafts.length >= maxAliases || previewBusy || creating) return
     const draft = newDraft()
     const root = draftsRoot.current
     const modal = root?.closest<HTMLElement>('.icloud-modal')
@@ -113,7 +119,7 @@ export function ICloudAliasBatchForm({ account, close, onCreated }: {
         }
       })
     }
-    void previewDraft(draft.id)
+    if (!usesAppleAccount) void previewDraft(draft.id)
   }
 
   function removeDraft(id: string) {
@@ -181,9 +187,9 @@ export function ICloudAliasBatchForm({ account, close, onCreated }: {
       const draft = snapshot[index]
       updateDraft(draft.id, { creationState: 'creating' })
       try {
-        const result = await api.createICloudAlias(
-          account.id, draft.label, draft.email, draft.previewId,
-        )
+        const result = await api.createICloudAlias(account.id, draft.label,
+          usesAppleAccount ? undefined : draft.email,
+          usesAppleAccount ? undefined : draft.previewId)
         created.push(result.alias)
         setProgress({ completed: created.length, total: snapshot.length })
         flushSync(() => updateDraft(draft.id, { creationState: 'success' }))
@@ -229,12 +235,12 @@ export function ICloudAliasBatchForm({ account, close, onCreated }: {
         <div className="icloud-alias-batch-summary">
           <span>{creating
             ? t('创建进度 {completed}/{total}', progress)
-            : <>{t('创建项目')} <strong>{drafts.length}/5</strong></>}</span>
+            : <>{t('创建项目')} <strong>{drafts.length}/{maxAliases}</strong></>}</span>
           <progress className={creating ? 'is-active' : ''} max={progress.total || 1}
             value={progress.completed} aria-label={t('创建进度')} aria-hidden={!creating} />
         </div>
         <button className="button button--secondary" type="button"
-          disabled={drafts.length >= MAX_ALIASES || previewBusy || creating}
+          disabled={drafts.length >= maxAliases || previewBusy || creating}
           onClick={addDraft}><Plus size={15} />{t('增加邮箱')}</button>
       </div>
       <div className="icloud-alias-drafts" ref={draftsRoot}>
@@ -251,6 +257,8 @@ export function ICloudAliasBatchForm({ account, close, onCreated }: {
                 {draft.creationState === 'success' && <Check size={16} aria-hidden="true" />}
                 {t(draft.creationState === 'creating' ? '正在创建'
                   : draft.creationState === 'success' ? '创建成功' : '等待创建')}
+              </span> : usesAppleAccount ? <span className="icloud-alias-creation-status">
+                <ShieldCheck size={15} aria-hidden="true" />{t('提交时直接创建')}
               </span> : <span className="icloud-alias-preview-actions">
                 <button className="icloud-alias-draft-action" type="button"
                   disabled={previewBusy || creating}
@@ -268,8 +276,8 @@ export function ICloudAliasBatchForm({ account, close, onCreated }: {
                 </button>}
               </span>}
             </div>
-            <strong aria-live="polite">{draft.email || t(draft.loading
-              ? '正在生成候选地址…' : '暂时无法生成地址')}</strong>
+            <strong aria-live="polite">{draft.email || t(usesAppleAccount
+              ? '提交时由 Apple 生成地址' : draft.loading ? '正在生成候选地址…' : '暂时无法生成地址')}</strong>
             <label><span>{t('用途标签（可选）')}</span><input value={draft.label}
               maxLength={80} data-modal-autofocus={index === 0 || undefined}
               onFocus={() => setActiveDraftId(draft.id)}
@@ -288,7 +296,9 @@ export function ICloudAliasBatchForm({ account, close, onCreated }: {
           aria-pressed={activeDraft?.label === t(preset)}
           onClick={() => activeDraft && setLabel(activeDraft.id, t(preset))}>{t(preset)}</button>)}
       </div>
-      <p className="icloud-form-note">{t('每个项目可填写独立标签；一次最多创建 5 个隐藏邮箱。')}</p>
+      <p className="icloud-form-note">{usesAppleAccount
+        ? t('Apple Account 通道会在提交时直接生成地址，一次最多提交 {max} 个项目。', { max: maxAliases })
+        : t('每个项目可填写独立标签；一次最多创建 5 个隐藏邮箱。')}</p>
       {createError && <p className="inline-error" role="alert">
         <AlertCircle size={15} />{t(createError)}
       </p>}

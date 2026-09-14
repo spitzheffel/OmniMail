@@ -16,6 +16,7 @@ import { errorMessage } from '../../../shared/api/errorMessage'
 import { t } from '../../../shared/i18n'
 import { DangerConfirmDialog } from '../../../shared/ui/dialogs/DangerConfirmDialog'
 import { ICloudRegionSelect } from './ICloudRegionSelect'
+import { ICloudAppleAccountLogin } from './ICloudAppleAccountLogin'
 
 function Spinner() {
   return <LoaderCircle className="spin" size={17} aria-hidden="true" />
@@ -95,36 +96,79 @@ export function ICloudModal({ title, description, suspended = false, onClose, ch
   )
 }
 
-export function AddICloudAccountDialog({ onClose, onCreated }: {
+export function AddICloudAccountDialog({ onClose, onCreated, onChanged }: {
   onClose: () => void
   onCreated: (account: ICloudAccount) => void
+  onChanged?: () => Promise<void>
 }) {
   const [name, setName] = useState('')
   const [host, setHost] = useState<ICloudHost>('icloud.com')
   const [cookies, setCookies] = useState('')
   const [icloudEmail, setICloudEmail] = useState('')
   const [appPassword, setAppPassword] = useState('')
+  const [appleId, setAppleId] = useState('')
+  const [applePassword, setApplePassword] = useState('')
+  const [appleCode, setAppleCode] = useState('')
+  const [appleChallengeId, setAppleChallengeId] = useState('')
+  const [appleChallengeExpiresAt, setAppleChallengeExpiresAt] = useState('')
+  const [appleAccountId, setAppleAccountId] = useState('')
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
+  const appleAccountLogin = Boolean(appleAccountId || appleId.trim() || applePassword)
   async function submit(event: FormEvent, close: () => void) {
     event.preventDefault(); setSaving(true); setError('')
     try {
+      if (appleChallengeId && appleAccountId) {
+        const result = await api.completeICloudAppleAccountLogin(appleAccountId, appleChallengeId, appleCode.trim())
+        setAppleCode(''); setAppleChallengeId(''); setAppleChallengeExpiresAt('')
+        if (result.account) onCreated(result.account)
+        else await onChanged?.()
+        close()
+        return
+      }
+      if (appleAccountId) {
+        const login = await api.startICloudAppleAccountLogin(appleAccountId, appleId.trim(), applePassword)
+        setApplePassword('')
+        if (login.needs2FA && login.challengeId) {
+          setAppleChallengeId(login.challengeId)
+          setAppleChallengeExpiresAt(login.expiresAt || '')
+          return
+        }
+        if (login.account) onCreated(login.account)
+        else await onChanged?.()
+        close()
+        return
+      }
       const result = await api.createICloudAccount({
-        name, host, cookies, icloudEmail, appPassword,
+        name, host, cookies: cookies || undefined, icloudEmail, appPassword,
+        ...(appleAccountLogin ? { appleAccountLogin: true } : {}),
       })
-      onCreated(result.account); close()
+      onCreated(result.account)
+      if (!appleAccountLogin) { close(); return }
+      setAppleAccountId(result.account.id)
+      const login = await api.startICloudAppleAccountLogin(result.account.id, appleId.trim(), applePassword)
+      setApplePassword('')
+      if (login.needs2FA && login.challengeId) {
+        setAppleChallengeId(login.challengeId)
+        setAppleChallengeExpiresAt(login.expiresAt || '')
+        return
+      }
+      if (login.account) onCreated(login.account)
+      else await onChanged?.()
+      close()
     } catch (submitError) {
+      setApplePassword('')
       setError(t('添加失败：{error}', { error: errorMessage(submitError) }))
     } finally { setSaving(false) }
   }
   return (
     <ICloudModal title={t('添加 iCloud 账号')} description={t('配置主邮箱收信、隐藏邮箱管理，或同时启用。')} onClose={onClose}>
       {(close) => <form className="icloud-form" onSubmit={(event) => void submit(event, close)}>
-        <p className="icloud-account-warning"><AlertCircle size={17} aria-hidden="true" />{t('至少配置一种：主邮箱与应用专用密码用于收信；Cookie 仅用于管理隐藏邮箱。')}</p>
+        <p className="icloud-account-warning"><AlertCircle size={17} aria-hidden="true" />{t('至少配置一种：主邮箱与应用专用密码用于收信；Cookie 或 Apple Account 用于管理隐藏邮箱。')}</p>
         <label><span>{t('账号名称')}</span><input value={name} maxLength={80} required autoFocus data-modal-autofocus onChange={(event) => setName(event.target.value)} placeholder={t('例如：个人 iCloud')} /></label>
         <div className="icloud-form-field"><span>{t('iCloud 区域')}</span><ICloudRegionSelect value={host} onChange={setHost} /></div>
         <label><span>Cookie · {t('可选')}</span><textarea value={cookies} rows={7}
-          required={!icloudEmail.trim() && !appPassword.trim()}
+          required={!icloudEmail.trim() && !appPassword.trim() && !appleAccountLogin}
           onChange={(event) => setCookies(event.target.value)} placeholder="X-APPLE-WEBAUTH-TOKEN=...; X-APPLE-ID-SESSION-ID=..." /></label>
         <p className="icloud-form-note"><EyeOff size={15} aria-hidden="true" />{t('Cookie 仅在同步、创建或管理隐藏邮箱时需要。')}</p>
         <fieldset className="icloud-optional-credentials">
@@ -139,9 +183,28 @@ export function AddICloudAccountDialog({ onClose, onCreated }: {
           </div>
           <p className="icloud-form-note"><KeyRound size={15} aria-hidden="true" />{t('只使用 iCloud 主邮箱时，只需填写邮箱和应用专用密码，无需 Cookie。')}</p>
         </fieldset>
+        <fieldset className="icloud-optional-credentials">
+          <legend><ShieldCheck size={16} aria-hidden="true" />{t('Apple Account 登录')}<small>{t('可选')}</small></legend>
+          {appleChallengeId ? <>
+            <label><span>{t('受信任设备验证码')}</span><input value={appleCode} inputMode="numeric" autoComplete="one-time-code"
+              minLength={6} maxLength={6} pattern="[0-9]{6}" required autoFocus data-modal-autofocus
+              onChange={(event) => setAppleCode(event.target.value.replace(/\D/g, '').slice(0, 6))} /></label>
+            <p className="icloud-form-note"><ShieldCheck size={15} />{appleChallengeExpiresAt
+              ? t('验证码将在 {expiresAt} 前有效', { expiresAt: new Date(appleChallengeExpiresAt).toLocaleTimeString() })
+              : t('验证码有效期约 10 分钟。')}</p>
+          </> : <>
+            <label><span>Apple ID</span><input type="email" value={appleId} maxLength={254}
+              required={Boolean(applePassword)} autoComplete="username"
+              onChange={(event) => setAppleId(event.target.value)} placeholder="name@example.com" /></label>
+            <label><span>{t('Apple ID 密码')}</span><input type="password" value={applePassword}
+              maxLength={128} required={Boolean(appleId)} autoComplete="current-password"
+              onChange={(event) => setApplePassword(event.target.value)} /></label>
+          </>}
+          <p className="icloud-form-note"><ShieldCheck size={15} />{t('Apple Account 登录后优先使用新接口创建隐藏邮箱；密码只用于本次请求。')}</p>
+        </fieldset>
         <p className="icloud-form-note"><ShieldCheck size={15} />{t('凭据会在 Worker 内加密，保存后不会回传到浏览器。')}</p>
         {error && <p className="inline-error" role="alert"><AlertCircle size={15} />{t(error)}</p>}
-        <footer><button className="button button--secondary" type="button" onClick={close}>{t('取消')}</button><button className="button button--primary" disabled={saving}>{saving ? <Spinner /> : <Plus size={16} />}{t('验证并添加')}</button></footer>
+        <footer><button className="button button--secondary" type="button" onClick={close}>{t('取消')}</button><button className="button button--primary" disabled={saving}>{saving ? <Spinner /> : appleChallengeId ? <ShieldCheck size={16} /> : <Plus size={16} />}{t(appleChallengeId ? '验证并完成登录' : '验证并添加')}</button></footer>
       </form>}
     </ICloudModal>
   )
@@ -212,6 +275,7 @@ export function ICloudAccountSettingsDialog({ account, onClose, onChanged, onDel
           <button className="button button--secondary" disabled={Boolean(saving)}>{saving === 'password' ? <Spinner /> : <ShieldCheck size={16} />}{t('测试并覆盖')}</button>
         </form>
       </div>
+      <ICloudAppleAccountLogin account={account} onChanged={onChanged} onNotice={onNotice} />
       {error && <p className="inline-error" role="alert"><AlertCircle size={15} />{t(error)}</p>}
       <footer className="icloud-credential-danger"><span>{t('删除账号会同时删除两项密文。')}</span><button className="button icloud-danger-button" type="button" onClick={() => setConfirmingDelete(true)} disabled={Boolean(saving)}><Trash2 size={15} />{t('删除这个 iCloud 账号')}</button></footer>
       {confirmingDelete && <DangerConfirmDialog

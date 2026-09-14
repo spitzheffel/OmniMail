@@ -1,9 +1,16 @@
 import { writeAudit } from '../../shared/audit/audit'
 import {
+  APPLE_ACCOUNT_ERROR_CODES,
   ICloudClient,
   ICLOUD_CREDENTIAL_ERROR_STATUS,
   ICloudRemoteError,
 } from './icloud-apple'
+import { AppleAccountClient } from './icloud-account-client'
+import {
+  deleteICloudAppleAccount,
+  refreshICloudAppleAccount,
+  updateICloudAppleAccount,
+} from './icloud-account-api'
 import {
   ICloudAccountStore,
   ICloudStoreError,
@@ -12,7 +19,12 @@ import {
 } from './icloud-store'
 import type { ICloudAccount, ICloudAlias } from './icloud-types'
 import type { Env, SessionUser } from '../../app/types'
-
+export {
+  createICloudAlias,
+  deleteICloudAppleAccount,
+  refreshICloudAppleAccount,
+  updateICloudAppleAccount,
+} from './icloud-account-api'
 function responseError(error: unknown): Response {
   if (error instanceof ICloudStoreError || error instanceof ICloudRemoteError) {
     return Response.json({ error: error.message }, { status: error.status })
@@ -20,7 +32,6 @@ function responseError(error: unknown): Response {
   console.error('iCloud request failed', error)
   return Response.json({ error: 'iCloud 暂时无法处理这个请求。' }, { status: 500 })
 }
-
 async function jsonBody(request: Request): Promise<Record<string, unknown>> {
   try {
     const body = await request.json<unknown>()
@@ -30,31 +41,25 @@ async function jsonBody(request: Request): Promise<Record<string, unknown>> {
     throw new ICloudStoreError(400, '请求体必须是 JSON 对象。')
   }
 }
-
 function stringField(value: unknown): string {
   return typeof value === 'string' ? value.trim() : ''
 }
-
 function validICloudEmail(value: string): boolean {
   return ['icloud.com', 'me.com', 'mac.com'].includes(value.toLowerCase().split('@')[1] || '')
 }
-
 function deriveICloudEmail(info: { appleId: string; primaryEmail: string }): string {
   if (validICloudEmail(info.primaryEmail)) return info.primaryEmail
   if (validICloudEmail(info.appleId)) return info.appleId
   const local = info.appleId.split('@')[0]
   return local ? `${local}@icloud.com` : ''
 }
-
 async function imapClient(email: string, appPassword: string) {
   const { ICloudImapClient } = await import('./icloud-imap')
   return new ICloudImapClient(email, appPassword)
 }
-
 function privateJson(body: unknown): Response {
   return Response.json(body, { headers: { 'Cache-Control': 'private, no-store' } })
 }
-
 async function validateAppPassword(email: string, password: string): Promise<void> {
   const client = await imapClient(email, password)
   try {
@@ -64,7 +69,6 @@ async function validateAppPassword(email: string, password: string): Promise<voi
     await client.close()
   }
 }
-
 function boundedInteger(
   value: string | null,
   fallback: number,
@@ -175,7 +179,8 @@ export async function createICloudAccount(
     }
     const cookies = body.cookies ? parseICloudCookies(body.cookies) : {}
     const hasCookies = Object.keys(cookies).length > 0
-    if (!hasCookies && !hasAppPassword) {
+    const wantsAppleAccountLogin = body.appleAccountLogin === true
+    if (!hasCookies && !hasAppPassword && !wantsAppleAccountLogin) {
       throw new ICloudStoreError(400, '请至少配置 iCloud Cookie，或填写主邮箱和应用专用密码。')
     }
     const store = new ICloudAccountStore(env, user.id)
@@ -194,6 +199,10 @@ export async function createICloudAccount(
       aliasActive: 0,
       lastValidated: '',
       lastError: '',
+      appleAccountState: null,
+      appleAccountStatus: 'none',
+      appleAccountExpiresAt: '',
+      appleAccountError: '',
       createdAt: now,
     }
     if (hasCookies) {
@@ -201,7 +210,10 @@ export async function createICloudAccount(
       if (validationError) throw validationError
     }
     if (hasAppPassword) await validateAppPassword(icloudEmail, appPassword)
-    if (!hasCookies) {
+    if (!hasCookies && !hasAppPassword && wantsAppleAccountLogin) {
+      account.status = 'pending'
+      account.lastValidated = ''
+    } else if (!hasCookies) {
       account.status = 'active'
       account.lastValidated = now
     }
@@ -317,6 +329,33 @@ export async function listICloudAliases(
     if (!accountId) throw new ICloudStoreError(400, '缺少 accountId。')
     const store = new ICloudAccountStore(env, user.id)
     const account = await store.get(accountId)
+    if (!Object.keys(account.cookies).length && account.appleAccountState) {
+      const appleClient = new AppleAccountClient(account.appleAccountState)
+      try {
+        const aliases = await appleClient.listAliases()
+        account.appleAccountState = appleClient.state
+        account.appleAccountStatus = 'active'
+        account.appleAccountExpiresAt = appleClient.state.expiresAt
+        account.appleAccountError = ''
+        account.aliasTotal = aliases.length
+        account.aliasActive = aliases.filter((alias) => alias.active).length
+        await store.saveAppleAccountState(account)
+        return Response.json({ aliases })
+      } catch (error) {
+        if (error instanceof ICloudRemoteError && error.code === APPLE_ACCOUNT_ERROR_CODES.auth) {
+          account.appleAccountStatus = 'expired'
+          account.appleAccountError = error.message.slice(0, 300)
+          await store.saveAppleAccountState(account).catch(() => undefined)
+        }
+        if (error instanceof ICloudRemoteError && error.code === APPLE_ACCOUNT_ERROR_CODES.api) {
+          // Apple Account management does not expose the legacy HME list on
+          // every region. Creation remains usable even when that optional
+          // listing endpoint is unavailable.
+          return Response.json({ aliases: [] })
+        }
+        throw error
+      }
+    }
     if (!Object.keys(account.cookies).length) {
       throw new ICloudStoreError(400, '该账号尚未配置 Cookie。')
     }
@@ -338,44 +377,6 @@ export async function listICloudAliases(
       await store.saveCookies(account)
       throw error
     }
-  } catch (error) {
-    return responseError(error)
-  }
-}
-
-export async function createICloudAlias(
-  env: Env,
-  user: SessionUser,
-  request: Request,
-  ip: string,
-): Promise<Response> {
-  try {
-    const body = await jsonBody(request)
-    const accountId = stringField(body.accountId)
-    const label = stringField(body.label)
-    const email = stringField(body.email).toLowerCase()
-    const previewId = stringField(body.previewId).toLowerCase()
-    if (!accountId || label.length > 80
-      || Boolean(email) !== Boolean(previewId)
-      || (email && !/^[^@\s]{1,64}@icloud\.com$/.test(email))
-      || (previewId && !/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/.test(previewId))) {
-      throw new ICloudStoreError(400, '隐藏邮箱参数无效。')
-    }
-    const store = new ICloudAccountStore(env, user.id)
-    const account = await store.get(accountId)
-    if (!Object.keys(account.cookies).length) {
-      throw new ICloudStoreError(400, '该账号尚未配置 Cookie。')
-    }
-    const client = new ICloudClient(account.cookies, account.host, previewId || undefined)
-    const alias = email
-      ? await client.reserveAlias(email, label)
-      : await client.createAlias(label)
-    await refreshAliasSummary(store, account, client)
-    await writeAudit(env, user.id, 'icloud.alias.create', accountId, ip, iCloudAuditDetail(account, {
-      alias: alias.email,
-      label: alias.label,
-    }))
-    return Response.json({ alias }, { status: 201 })
   } catch (error) {
     return responseError(error)
   }

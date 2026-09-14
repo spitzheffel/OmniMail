@@ -19,10 +19,11 @@ const COOKIE_VALUE = /^[\x21\x23-\x2b\x2d-\x3a\x3c-\x5b\x5d-\x7e]+$/
 
 type PublicICloudAccountRow = Omit<
   ICloudAccountRow,
-  'user_id' | 'cookies_cipher' | 'app_password_cipher' | 'updated_at'
+  'user_id' | 'cookies_cipher' | 'app_password_cipher' | 'apple_account_state_cipher' | 'updated_at'
 > & {
   has_cookies: number
   has_app_password: number
+  has_apple_account: number
 }
 
 export class ICloudStoreError extends Error {
@@ -97,11 +98,20 @@ export function parseICloudCookies(raw: unknown): Record<string, string> {
 }
 
 export function publicICloudAccount(account: ICloudAccount): PublicICloudAccount {
-  const { cookies, appPassword, userId: _userId, ...safe } = account
+  const {
+    cookies,
+    appPassword,
+    appleAccountState: _appleAccountState,
+    userId: _userId,
+    ...safe
+  } = account
   return {
     ...safe,
     hasCookies: Object.keys(cookies).length > 0,
     hasAppPassword: Boolean(appPassword),
+    hasAppleAccount: Boolean(account.appleAccountState),
+    appleAccountStatus: account.appleAccountStatus || 'none',
+    appleAccountExpiresAt: account.appleAccountExpiresAt || '',
   }
 }
 
@@ -120,6 +130,9 @@ function publicICloudAccountRow(row: PublicICloudAccountRow): PublicICloudAccoun
     createdAt: row.created_at,
     hasCookies: Boolean(row.has_cookies),
     hasAppPassword: Boolean(row.has_app_password),
+    hasAppleAccount: Boolean(row.has_apple_account),
+    appleAccountStatus: row.apple_account_status,
+    appleAccountExpiresAt: row.apple_account_expires_at,
   }
 }
 
@@ -136,13 +149,13 @@ export class ICloudAccountStore {
     }
   }
 
-  private context(accountId: string, field: 'cookies' | 'app-password'): string {
+  private context(accountId: string, field: 'cookies' | 'app-password' | 'apple-account'): string {
     return `${this.userId}:${accountId}:${field}`
   }
 
   private async fromRow(row: ICloudAccountRow): Promise<ICloudAccount> {
     if (row.user_id !== this.userId) throw new ICloudStoreError(404, 'iCloud 账号不存在。')
-    const [cookiesText, appPassword] = await Promise.all([
+    const [cookiesText, appPassword, appleStateText] = await Promise.all([
       decryptICloudCredential(
         this.env,
         row.cookies_cipher,
@@ -153,12 +166,25 @@ export class ICloudAccountStore {
         row.app_password_cipher,
         this.context(row.id, 'app-password'),
       ),
+      decryptICloudCredential(
+        this.env,
+        row.apple_account_state_cipher,
+        this.context(row.id, 'apple-account'),
+      ),
     ])
     let cookies: Record<string, string> = {}
     try {
       cookies = cookiesText ? JSON.parse(cookiesText) as Record<string, string> : {}
     } catch {
       throw new ICloudStoreError(500, 'iCloud 账号凭据已损坏。')
+    }
+    let appleAccountState = null
+    if (appleStateText) {
+      try {
+        appleAccountState = JSON.parse(appleStateText)
+      } catch {
+        throw new ICloudStoreError(500, 'Apple Account 登录态已损坏。')
+      }
     }
     return {
       id: row.id,
@@ -174,6 +200,10 @@ export class ICloudAccountStore {
       aliasActive: Number(row.alias_active),
       lastValidated: row.last_validated,
       lastError: row.last_error,
+      appleAccountState,
+      appleAccountStatus: row.apple_account_status,
+      appleAccountExpiresAt: row.apple_account_expires_at,
+      appleAccountError: row.apple_account_error,
       createdAt: row.created_at,
     }
   }
@@ -183,7 +213,9 @@ export class ICloudAccountStore {
       `SELECT id, name, real_email, icloud_email, host, status,
               alias_total, alias_active, last_validated, last_error, created_at,
               CASE WHEN cookies_cipher <> '' THEN 1 ELSE 0 END AS has_cookies,
-              CASE WHEN app_password_cipher <> '' THEN 1 ELSE 0 END AS has_app_password
+              CASE WHEN app_password_cipher <> '' THEN 1 ELSE 0 END AS has_app_password,
+              CASE WHEN apple_account_state_cipher <> '' THEN 1 ELSE 0 END AS has_apple_account,
+              apple_account_status, apple_account_expires_at
        FROM icloud_accounts WHERE user_id = ?
        ORDER BY CASE status WHEN 'active' THEN 0 WHEN 'pending' THEN 1 ELSE 2 END,
                 created_at`,
@@ -209,7 +241,7 @@ export class ICloudAccountStore {
 
   async insert(account: ICloudAccount): Promise<void> {
     const now = new Date().toISOString()
-    const [cookiesCipher, passwordCipher] = await Promise.all([
+    const [cookiesCipher, passwordCipher, appleStateCipher] = await Promise.all([
       encryptICloudCredential(
         this.env,
         JSON.stringify(account.cookies),
@@ -220,13 +252,20 @@ export class ICloudAccountStore {
         account.appPassword,
         this.context(account.id, 'app-password'),
       ),
+      encryptICloudCredential(
+        this.env,
+        account.appleAccountState ? JSON.stringify(account.appleAccountState) : '',
+        this.context(account.id, 'apple-account'),
+      ),
     ])
     await this.env.DB.prepare(
       `INSERT INTO icloud_accounts (
         id, user_id, name, real_email, icloud_email, cookies_cipher, host,
         app_password_cipher, status, alias_total, alias_active,
-        last_validated, last_error, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        last_validated, last_error, apple_account_state_cipher,
+        apple_account_expires_at, apple_account_status, apple_account_error,
+        created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).bind(
       account.id,
       this.userId,
@@ -241,6 +280,10 @@ export class ICloudAccountStore {
       account.aliasActive,
       account.lastValidated,
       account.lastError,
+      appleStateCipher,
+      account.appleAccountExpiresAt || '',
+      account.appleAccountStatus || 'none',
+      account.appleAccountError || '',
       account.createdAt,
       now,
     ).run()
@@ -299,6 +342,37 @@ export class ICloudAccountStore {
        next_sync_at = 0, sync_lease_id = NULL, sync_lease_until = NULL,
        updated_at = ? WHERE id = ? AND user_id = ?`,
     ).bind(icloudEmail, cipher, new Date().toISOString(), id, this.userId).run()
+    if (!result.meta.changes) throw new ICloudStoreError(404, 'iCloud 账号不存在。')
+  }
+
+  async saveAppleAccountState(account: ICloudAccount): Promise<void> {
+    const cipher = await encryptICloudCredential(
+      this.env,
+      account.appleAccountState ? JSON.stringify(account.appleAccountState) : '',
+      this.context(account.id, 'apple-account'),
+    )
+    const result = await this.env.DB.prepare(
+      `UPDATE icloud_accounts SET apple_account_state_cipher = ?,
+        apple_account_expires_at = ?, apple_account_status = ?, apple_account_error = ?,
+        updated_at = ? WHERE id = ? AND user_id = ?`,
+    ).bind(
+      cipher,
+      account.appleAccountExpiresAt || '',
+      account.appleAccountStatus || 'none',
+      account.appleAccountError || '',
+      new Date().toISOString(),
+      account.id,
+      this.userId,
+    ).run()
+    if (!result.meta.changes) throw new ICloudStoreError(404, 'iCloud 账号不存在。')
+  }
+
+  async clearAppleAccountState(id: string): Promise<void> {
+    const result = await this.env.DB.prepare(
+      `UPDATE icloud_accounts SET apple_account_state_cipher = '',
+        apple_account_expires_at = '', apple_account_status = 'none', apple_account_error = '',
+        updated_at = ? WHERE id = ? AND user_id = ?`,
+    ).bind(new Date().toISOString(), id, this.userId).run()
     if (!result.meta.changes) throw new ICloudStoreError(404, 'iCloud 账号不存在。')
   }
 }

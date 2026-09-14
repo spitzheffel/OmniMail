@@ -8,7 +8,7 @@ iCloud 账号、凭据、隐藏地址和按需收件箱。
 
 > iCloud accounts, credentials, aliases, and on-demand inbox access.
 
-本分类共 **13** 个端点。返回 [完整 API 索引](README.md) 或 [API 架构与安全说明](../API.md)。
+本分类共 **18** 个端点。返回 [完整 API 索引](README.md) 或 [API 架构与安全说明](../API.md)。
 
 <!-- endpoint:GET /api/icloud/accounts catalog:82cd25d54b99 -->
 ## `GET /api/icloud/accounts`
@@ -33,7 +33,7 @@ curl --request GET \
   --header "Authorization: Bearer om_at_..."
 ```
 
-<!-- endpoint:POST /api/icloud/accounts catalog:a09af8fb6337 -->
+<!-- endpoint:POST /api/icloud/accounts catalog:99142fefb9aa -->
 ## `POST /api/icloud/accounts`
 
 **连接 iCloud 账户 / Connect an iCloud account**
@@ -45,7 +45,7 @@ curl --request GET \
 | 项目 | 内容 |
 | --- | --- |
 | 认证 | 登录用户；支持 Session Cookie 或 Access Token |
-| 请求 | JSON · name, cookies?, host=icloud.com\|icloud.com.cn, icloudEmail?, appPassword? |
+| 请求 | JSON · name, cookies?, host=icloud.com\|icloud.com.cn, icloudEmail?, appPassword?, appleAccountLogin? |
 | 成功响应 | 201 · { account } |
 
 > 注意：Cookie 属于高敏感凭据，只应提交给自己的 OmniMail 实例。
@@ -172,6 +172,145 @@ curl --request PUT \
   --data '{
   "icloudEmail": "owner@icloud.com",
   "appPassword": "xxxx-xxxx-xxxx-xxxx"
+}'
+```
+
+<!-- endpoint:PUT /api/icloud/accounts/:id/apple-account catalog:85713db3f720 -->
+## `PUT /api/icloud/accounts/{id}/apple-account`
+
+**导入 Apple Account 管理态 / Import Apple Account management state**
+
+验证并加密保存 Apple Account 的 Cookie、scnt 和动态 apiKey。
+
+> Validate and encrypt Apple Account cookies, scnt, and dynamic apiKey.
+
+| 项目 | 内容 |
+| --- | --- |
+| 认证 | 登录用户；支持 Session Cookie 或 Access Token |
+| 请求 | Path · id; JSON · state={ cookies, scnt, apiKey, sessionId?, expiresAt? } |
+| 成功响应 | 200 · { account } |
+
+### cURL 示例
+
+```bash
+curl --request PUT \
+  --url "https://mail.example.com/api/icloud/accounts/resource_id/apple-account" \
+  --header "Authorization: Bearer om_at_..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "state": {
+    "cookies": {
+      "myacinfo": "cookie-value"
+    },
+    "scnt": "scnt-value",
+    "apiKey": "api-key-value"
+  }
+}'
+```
+
+<!-- endpoint:POST /api/icloud/accounts/:id/apple-account/refresh catalog:d6d1d9c00606 -->
+## `POST /api/icloud/accounts/{id}/apple-account/refresh`
+
+**刷新 Apple Account 管理态 / Refresh Apple Account management state**
+
+按 Apple 返回的短期 TTL 刷新 scnt、Cookie 和 apiKey。
+
+> Refresh scnt, cookies, and apiKey using Apple’s short-lived TTL.
+
+| 项目 | 内容 |
+| --- | --- |
+| 认证 | 登录用户；支持 Session Cookie 或 Access Token |
+| 请求 | Path · id |
+| 成功响应 | 200 · { account } |
+
+### cURL 示例
+
+```bash
+curl --request POST \
+  --url "https://mail.example.com/api/icloud/accounts/resource_id/apple-account/refresh" \
+  --header "Authorization: Bearer om_at_..."
+```
+
+<!-- endpoint:DELETE /api/icloud/accounts/:id/apple-account catalog:fae3663092e5 -->
+## `DELETE /api/icloud/accounts/{id}/apple-account`
+
+**移除 Apple Account 管理态 / Remove Apple Account management state**
+
+删除当前账号保存的 Apple Account 管理态，不影响 Apple 账号或已有地址。
+
+> Delete the saved Apple Account management state without affecting the Apple account or existing aliases.
+
+| 项目 | 内容 |
+| --- | --- |
+| 认证 | 登录用户；支持 Session Cookie 或 Access Token |
+| 请求 | Path · id |
+| 成功响应 | 200 · { ok: true } |
+
+### cURL 示例
+
+```bash
+curl --request DELETE \
+  --url "https://mail.example.com/api/icloud/accounts/resource_id/apple-account" \
+  --header "Authorization: Bearer om_at_..."
+```
+
+<!-- endpoint:POST /api/icloud/accounts/:id/apple-account/login/start catalog:af9308db9228 -->
+## `POST /api/icloud/accounts/{id}/apple-account/login/start`
+
+**开始 Apple Account 登录 / Start Apple Account sign-in**
+
+使用 Apple ID 和密码启动管理态登录；密码只用于本次请求。
+
+> Start management sign-in with an Apple ID and password; the password is used only for this request.
+
+| 项目 | 内容 |
+| --- | --- |
+| 认证 | 登录用户；支持 Session Cookie 或 Access Token |
+| 请求 | Path · id; JSON · appleId, password |
+| 成功响应 | 200 · { needs2FA, challengeId?, expiresAt? } |
+
+> 注意：不要向非自有 OmniMail 实例提交 Apple ID 密码。
+>
+> Note: Never submit an Apple ID password to an OmniMail instance you do not control.
+
+### cURL 示例
+
+```bash
+curl --request POST \
+  --url "https://mail.example.com/api/icloud/accounts/resource_id/apple-account/login/start" \
+  --header "Authorization: Bearer om_at_..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "appleId": "owner@example.com",
+  "password": "never-log-this"
+}'
+```
+
+<!-- endpoint:POST /api/icloud/accounts/:id/apple-account/login/2fa catalog:d2fb6fbe8184 -->
+## `POST /api/icloud/accounts/{id}/apple-account/login/2fa`
+
+**完成 Apple Account 二次验证 / Complete Apple Account two-factor sign-in**
+
+提交受信任设备的 6 位验证码并保存管理态。
+
+> Submit the six-digit trusted-device code and save the management state.
+
+| 项目 | 内容 |
+| --- | --- |
+| 认证 | 登录用户；支持 Session Cookie 或 Access Token |
+| 请求 | Path · id; JSON · challengeId, code |
+| 成功响应 | 200 · { needs2FA: false, account } |
+
+### cURL 示例
+
+```bash
+curl --request POST \
+  --url "https://mail.example.com/api/icloud/accounts/resource_id/apple-account/login/2fa" \
+  --header "Authorization: Bearer om_at_..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "challengeId": "challenge_id",
+  "code": "123456"
 }'
 ```
 
