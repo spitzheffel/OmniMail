@@ -153,6 +153,10 @@ export async function deviceScopesAllow(scopes: string, request: Request): Promi
     && requestMethod === 'PUT') {
     return hasScope(scopes, 'icloud:accounts:write')
   }
+  if (/^\/api\/icloud\/accounts\/[^/]+\/apple-account(?:\/.*)?$/.test(path)
+    && (requestMethod === 'POST' || requestMethod === 'PUT' || requestMethod === 'DELETE')) {
+    return hasScope(scopes, 'icloud:accounts:write')
+  }
   if (requestMethod === 'GET' && path === '/api/icloud/aliases') {
     return hasScope(scopes, 'icloud:aliases:read')
   }

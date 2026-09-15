@@ -128,6 +128,8 @@ Serverless Webmail：
 
 - 每个 OmniMail 用户可以连接自己的 `icloud.com` 或 `icloud.com.cn` 账号
 - 同步、创建、停用、恢复和删除 iCloud+ Hide My Email 地址
+- 支持在面板内使用 Apple ID + 2FA 登录 Apple Account 管理接口；新接口优先创建，旧 Cookie 接口保留回退
+- 新接口每个 Apple Account 约可创建 20 个/小时；同时配置旧 Cookie 时合计目标约 25 个/小时，实际额度以 Apple 返回为准
 - 应用专用密码可通过 iCloud IMAP 按隐藏地址筛选并读取完整正文；IMAP 不可用时，
   全部邮件视图会回退到 iCloud Web 摘要
 - iCloud Cookie 与应用专用密码使用 AES-GCM 加密后保存到 D1，密文绑定用户、账号
@@ -138,6 +140,7 @@ Serverless Webmail：
 
 - 仅支持已开通 iCloud+ 且拥有 **Hide My Email** 权限的 Apple 账号；“仅网页访问”、未开通 iCloud+ 或没有隐藏邮箱权限的账号无法添加。
 - 添加账号时需要从对应的 `icloud.com` / `icloud.com.cn` 会话导入 Cookie。Cookie 过期、复制不完整或 Apple 拒绝权限时，添加会失败并在弹窗显示原因，不会退出 OmniMail 当前登录账号。
+- Apple Account 管理态是短期登录态；OmniMail 会保存加密的 Cookie、`scnt`、动态 `apiKey` 和过期时间，过期后需要刷新或重新完成登录。Apple ID 密码不会保存。
 - `MAIL_CREDENTIALS_KEY`（或兼容的 `ICLOUD_CREDENTIALS_KEY`）必须配置为至少 32 字节的 Secret；更换或恢复部署时请确认该 Secret 没有丢失，否则无法解密已保存凭据。
 - `MAIL_CREDENTIALS_KEY`（或兼容的 `LINUX_DO_MAIL_CREDENTIALS_KEY`）必须配置为至少 32 字节的 Secret；它用于加密 Linux DO Mail 密码或认证令牌。
 - 应用专用密码不是创建隐藏邮箱的必需项；只有需要通过 IMAP 按地址筛选或读取完整邮件正文时才需要配置，并且必须绑定当前 iCloud 邮箱。
@@ -377,7 +380,7 @@ Import a repository**，选择你的 OmniMail 仓库：
 | 项目 | 值 |
 | --- | --- |
 | Project name | `omni-mail` |
-| Production branch | `main` |
+| Production branch | `develop` |
 | Root directory | `/` |
 | Build command | `npm run build` |
 | Deploy command | `npm run deploy` |
@@ -427,7 +430,7 @@ Worker 默认名称是 `omni-mail`，代码中的 D1 绑定名始终是 `DB`。�
 `/api/*` 优先交给 Worker 脚本，其余路径由 Static Assets 提供；未匹配的浏览器
 导航会回退到 `index.html`，因此 React SPA 刷新不会出现 404。
 
-Cloudflare Workers Builds 会在 `main` 更新后自动拉取、构建并部署，不需要在
+Cloudflare Workers Builds 会在 `develop` 更新后自动拉取、构建并部署，不需要在
 GitHub Actions 中重复配置 Cloudflare API Token。GitHub Actions 只负责运行测试、
 类型检查和部署预检。
 
@@ -458,9 +461,10 @@ Worker 文件，剩余路径仍会匹配 `*` 并正常部署。Build watch paths
 #### 后续同步上游更新
 
 原仓库发布更新后，在自己的 Fork 页面选择 **Sync fork → Update branch**。GitHub
-会把上游提交同步到 Fork 的 `main`；Workers Builds 检测到新提交后会自动运行上述
-构建、D1 迁移和部署命令。存在冲突时，先按 GitHub 提示创建 Pull Request 并人工解决，
-不要强制覆盖包含自定义修改的生产分支。
+会把上游提交同步到 Fork 的 `main`；确认测试通过后，将 `main` 合并到 `develop`，
+再由 Workers Builds 运行上述构建、D1 迁移和部署命令。功能改动请从 `develop` 创建
+`feature/*` 分支并通过 Pull Request 合并。存在冲突时在 `develop` 解决，不要强制覆盖
+包含自定义改动的分支。
 
 ### 3. 配置 Worker
 

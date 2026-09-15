@@ -454,6 +454,8 @@
 .icloud-label-presets button[aria-pressed="true"] { border-color: var(--accent); background: var(--accent); color: var(--accent-contrast); }
 .icloud-credential-forms { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 .icloud-credential-forms .icloud-form { padding: 16px; border: 1px solid var(--line); border-radius: 15px; }
+.icloud-apple-account-form { margin-top: 16px; padding: 16px; border: 1px solid var(--line); border-radius: 15px; }
+.icloud-apple-account-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .icloud-credential-danger { display: flex; justify-content: space-between; gap: 14px; align-items: center; margin-top: 16px; padding-top: 15px; border-top: 1px solid var(--line); color: var(--text-tertiary); font-size: 11px; }
 .icloud-danger-button { border-color: color-mix(in srgb, var(--danger) 32%, var(--line)); background: var(--danger-soft); color: var(--danger); box-shadow: none; }
 .icloud-danger-button:hover:not(:disabled) { border-color: color-mix(in srgb, var(--danger) 52%, var(--line)); background: color-mix(in srgb, var(--danger-soft) 84%, var(--danger)); }

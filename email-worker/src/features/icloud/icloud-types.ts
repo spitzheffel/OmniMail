@@ -1,5 +1,18 @@
 export type ICloudHost = 'icloud.com' | 'icloud.com.cn'
 export type ICloudAccountStatus = 'active' | 'pending' | 'error'
+export type AppleAccountStatus = 'none' | 'active' | 'expired' | 'error'
+
+export interface AppleAccountState {
+  cookies: Record<string, string>
+  scnt: string
+  sessionId: string
+  apiKey: string
+  expiresAt: string
+  lastCheckedAt: string
+  userAgent: string
+  host: string
+  origin: string
+}
 
 export interface ICloudAccount {
   id: string
@@ -15,6 +28,10 @@ export interface ICloudAccount {
   aliasActive: number
   lastValidated: string
   lastError: string
+  appleAccountState?: AppleAccountState | null
+  appleAccountStatus?: AppleAccountStatus
+  appleAccountExpiresAt?: string
+  appleAccountError?: string
   createdAt: string
 }
 
@@ -32,15 +49,22 @@ export interface ICloudAccountRow {
   alias_active: number
   last_validated: string
   last_error: string
+  apple_account_state_cipher: string
+  apple_account_expires_at: string
+  apple_account_status: AppleAccountStatus
+  apple_account_error: string
   created_at: string
 }
 
 export type PublicICloudAccount = Omit<
   ICloudAccount,
-  'cookies' | 'appPassword' | 'userId'
+  'cookies' | 'appPassword' | 'appleAccountState' | 'userId'
 > & {
   hasCookies: boolean
   hasAppPassword: boolean
+  hasAppleAccount: boolean
+  appleAccountStatus: AppleAccountStatus
+  appleAccountExpiresAt: string
 }
 
 export interface ICloudAlias {

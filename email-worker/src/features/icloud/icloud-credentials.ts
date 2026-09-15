@@ -5,3 +5,5 @@ const credentials = mailCredentialCipher('ICLOUD_CREDENTIALS_KEY', 'iCloud', tru
 export const iCloudCredentialsReady = credentials.ready
 export const encryptICloudCredential = credentials.encrypt
 export const decryptICloudCredential = credentials.decrypt
+export const encryptICloudSecret = encryptICloudCredential
+export const decryptICloudSecret = decryptICloudCredential

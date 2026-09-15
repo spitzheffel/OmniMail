@@ -1,4 +1,4 @@
-import type { ICloudAccount, ICloudAlias, ICloudHost, ICloudMessage } from '../../../shared/api/api-types'
+import type { AppleAccountState, ICloudAccount, ICloudAlias, ICloudHost, ICloudMessage } from '../../../shared/api/api-types'
 
 type Request = <T>(path: string, init?: RequestInit) => Promise<T>
 
@@ -10,9 +10,10 @@ export function createICloudApi(request: Request, jsonBody: (value: unknown) => 
     createICloudAccount: (input: {
       name: string
       host: ICloudHost
-      cookies: string
+      cookies?: string
       icloudEmail?: string
       appPassword?: string
+      appleAccountLogin?: boolean
     }) => (
       request<{ account: ICloudAccount }>('/api/icloud/accounts', {
         method: 'POST', body: jsonBody(input),
@@ -35,6 +36,34 @@ export function createICloudApi(request: Request, jsonBody: (value: unknown) => 
         `/api/icloud/accounts/${encodeURIComponent(id)}/app-password`,
         { method: 'PUT', body: jsonBody({ icloudEmail, appPassword }) },
       )
+    ),
+    startICloudAppleAccountLogin: (id: string, appleId: string, password: string) => (
+      request<{
+        needs2FA: boolean
+        challengeId?: string
+        expiresAt?: string
+        account?: ICloudAccount
+      }>(`/api/icloud/accounts/${encodeURIComponent(id)}/apple-account/login/start`, {
+        method: 'POST', body: jsonBody({ appleId, password }),
+      })
+    ),
+    completeICloudAppleAccountLogin: (id: string, challengeId: string, code: string) => (
+      request<{ needs2FA: false; account?: ICloudAccount }>(
+        `/api/icloud/accounts/${encodeURIComponent(id)}/apple-account/login/2fa`,
+        { method: 'POST', body: jsonBody({ challengeId, code }) },
+      )
+    ),
+    updateICloudAppleAccount: (id: string, state: AppleAccountState) => request<{ account: ICloudAccount }>(
+      `/api/icloud/accounts/${encodeURIComponent(id)}/apple-account`,
+      { method: 'PUT', body: jsonBody({ state }) },
+    ),
+    refreshICloudAppleAccount: (id: string) => request<{ account: ICloudAccount }>(
+      `/api/icloud/accounts/${encodeURIComponent(id)}/apple-account/refresh`,
+      { method: 'POST' },
+    ),
+    deleteICloudAppleAccount: (id: string) => request<{ ok: true }>(
+      `/api/icloud/accounts/${encodeURIComponent(id)}/apple-account`,
+      { method: 'DELETE' },
     ),
     iCloudAliases: (accountId: string, signal?: AbortSignal) => request<{ aliases: ICloudAlias[] }>(
       `/api/icloud/aliases?accountId=${encodeURIComponent(accountId)}`,
