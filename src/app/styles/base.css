@@ -484,10 +484,26 @@ textarea:focus-visible {
   line-height: 1.65;
 }
 
-.error-card {
+.auth-card.error-card {
   margin: 0;
   text-align: left;
 }
+
+.error-card h1 { font-size: clamp(24px, 4vw, 33px); text-wrap: balance; }
+
+.connection-quota {
+  margin: 22px 0;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-muted);
+  font-size: 14px;
+  line-height: 1.7;
+}
+
+.connection-quota dt { color: var(--text-secondary); font-size: 12px; }
+.connection-quota dd { margin: 4px 0 16px; overflow-wrap: anywhere; }
+.connection-quota dd:last-child { margin-bottom: 0; }
 
 .page-content-enter {
   backface-visibility: hidden;

@@ -1,5 +1,5 @@
 import { t } from '../i18n'
-import { recordServiceBackoff, serviceBackoff, serviceBackoffMessage } from './service-backoff'
+import { recordServiceBackoff, serviceBackoff, serviceBackoffMessage, type ServiceBackoff } from './service-backoff'
 import type {
   AdminMessageAction,
   AdminMessageDetail,
@@ -57,10 +57,12 @@ import { createMailApi } from '../../features/mailbox/api/mail-api-client'
 
 export class ApiError extends Error {
   status: number
+  readonly quota?: ServiceBackoff
 
-  constructor(message: string, status: number) {
+  constructor(message: string, status: number, quota?: ServiceBackoff) {
     super(message)
     this.status = status
+    this.quota = quota
   }
 }
 
@@ -72,7 +74,7 @@ type RequestOptions = RequestInit & { timeoutMs?: number }
 
 export async function request<T>(path: string, init: RequestOptions = {}): Promise<T> {
   const paused = serviceBackoff()
-  if (paused) throw new ApiError(serviceBackoffMessage(paused), 503)
+  if (paused) throw new ApiError(serviceBackoffMessage(paused), 503, paused)
   const { timeoutMs = REQUEST_TIMEOUT_MS, ...requestInit } = init
   const headers = new Headers(requestInit.headers)
   if (requestInit.body && !(requestInit.body instanceof FormData) && !headers.has('Content-Type')) {
@@ -95,8 +97,8 @@ export async function request<T>(path: string, init: RequestOptions = {}): Promi
   }
   const data = await response.json().catch(() => ({})) as { error?: string }
   if (!response.ok) {
-    const backoff = response.status === 503 ? recordServiceBackoff(data) : undefined
-    if (backoff) throw new ApiError(serviceBackoffMessage(backoff), response.status)
+    const backoff = response.status >= 500 || response.status === 429 ? recordServiceBackoff(data) : undefined
+    if (backoff) throw new ApiError(serviceBackoffMessage(backoff), response.status, backoff)
     if (response.status === 401 && typeof window !== 'undefined') {
       window.dispatchEvent(new Event(AUTH_REQUIRED_EVENT))
     }

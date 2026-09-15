@@ -21,7 +21,8 @@ import {
 import { api, type RegistrationDomainPolicy, type User } from '../../../shared/api'
 import type { SetupRequirements } from '../../../shared/api'
 import { errorMessage } from '../../../shared/api/errorMessage'
-import { t } from '../../../shared/i18n'
+import type { ServiceBackoff } from '../../../shared/api/service-backoff'
+import { getLocale, t } from '../../../shared/i18n'
 import { AuthModal, type AuthMode } from './AuthModal'
 export { AuthModal } from './AuthModal'
 import {
@@ -93,14 +94,24 @@ export function PageLoader() {
   )
 }
 
-export function ConnectionError({ message, retry }: { message: string; retry: () => void }) {
+export function ConnectionError({ message, quota, retry }: { message: string; quota?: ServiceBackoff; retry: () => void }) {
   return (
     <main className="center-page">
       <section className="auth-card error-card">
         <span className="auth-symbol auth-symbol--danger"><AlertCircle size={27} /></span>
-        <p className="eyebrow">CONNECTION ERROR</p>
-        <h1>{t('暂时无法连接邮箱')}</h1>
-        <p>{message}</p>
+        <p className="eyebrow">{quota ? 'D1 DAILY LIMIT' : 'CONNECTION ERROR'}</p>
+        <h1>{t(quota ? '数据库今日额度已用完' : '暂时无法连接邮箱')}</h1>
+        {quota ? <>
+          <dl className="connection-quota">
+            <dt>{t('无法连接的原因')}</dt>
+            <dd>{t('Cloudflare D1 数据库已达到今日读取或写入额度，邮箱暂时无法读取或保存数据。')}</dd>
+            <dt>{t('预计恢复时间（本地时间）')}</dt>
+            <dd><time dateTime={new Date(quota.resetAt).toISOString()}>{new Date(quota.resetAt).toLocaleString(getLocale(), {
+              month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit', timeZoneName: 'short',
+            })}</time></dd>
+          </dl>
+          <p>{t('请等待额度恢复后重新连接，无需反复刷新页面。如需提前恢复，请联系管理员检查 Cloudflare 套餐与用量。')}</p>
+        </> : <p>{message}</p>}
         <button className="button button--primary" type="button" onClick={retry}>
           <RefreshCw size={16} /> {t('重新连接')}
         </button>

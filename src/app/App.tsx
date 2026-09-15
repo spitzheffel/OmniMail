@@ -357,7 +357,7 @@ export function App() {
   const [config, setConfig] = useState<AppConfig | null>(null)
   const [user, setUser] = useState<User | null>(null)
   const [loading, setLoading] = useState(true)
-  const [connectionError, setConnectionError] = useState('')
+  const [connectionError, setConnectionError] = useState<{ message: string; quota?: ApiError['quota'] } | null>(null)
   const [loadVersion, setLoadVersion] = useState(0)
   const [inviteToken] = useState(() => new URLSearchParams(window.location.search).get('invite'))
   const extensionAuthorization = window.location.pathname === '/extension/authorize'
@@ -371,7 +371,7 @@ export function App() {
   useEffect(() => {
     let active = true
     setLoading(true)
-    setConnectionError('')
+    setConnectionError(null)
     Promise.all([api.config(), api.session(), openingSplashDelay(loadVersion > 0)])
       .then(([nextConfig, session]) => {
         if (!active) return
@@ -379,7 +379,7 @@ export function App() {
         setUser(session.user)
       })
       .catch((error) => {
-        if (active) setConnectionError(errorMessage(error))
+        if (active) setConnectionError({ message: errorMessage(error), quota: error instanceof ApiError ? error.quota : undefined })
       })
       .finally(() => {
         if (active) setLoading(false)
@@ -398,7 +398,7 @@ export function App() {
   }, [clearSession])
   if (loading || !localeReady) return <PageLoader />
   if (connectionError || !config) {
-    return <ConnectionError message={connectionError || t('配置读取失败。')} retry={() => setLoadVersion((value) => value + 1)} />
+    return <ConnectionError message={connectionError?.message || t('配置读取失败。')} quota={connectionError?.quota} retry={() => setLoadVersion((value) => value + 1)} />
   }
   if (!config.setupComplete) {
     return (

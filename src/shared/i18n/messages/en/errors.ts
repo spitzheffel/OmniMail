@@ -1,4 +1,9 @@
 export const enErrors: Record<string, string> = {
+  '数据库今日额度已用完': 'Daily database quota exhausted',
+  '无法连接的原因': 'Why the connection failed',
+  'Cloudflare D1 数据库已达到今日读取或写入额度，邮箱暂时无法读取或保存数据。': 'Cloudflare D1 has reached its daily read or write quota. Your mailbox cannot read or save data right now.',
+  '预计恢复时间（本地时间）': 'Expected reset (local time)',
+  '请等待额度恢复后重新连接，无需反复刷新页面。如需提前恢复，请联系管理员检查 Cloudflare 套餐与用量。': 'Reconnect after the quota resets; repeated refreshes will not help. To restore access sooner, contact the administrator to check the Cloudflare plan and usage.',
   '数据库今日读写额度已用完。预计 {time} 恢复；自动请求已退避，请稍后重试或联系管理员。': 'The database daily read/write quota is exhausted. It is expected to reset at {time}. Automatic requests are backed off; retry later or contact the administrator.',
   '备份、保留、草稿或默认配额设置无效。':
     'Backup, retention, draft, or default quota settings are invalid.',

@@ -5,13 +5,18 @@ function json(route: Route, body: unknown, status = 200) {
   return route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) })
 }
 
-async function setup(page: Page, role = 'super_admin', ready = false) {
+async function setup(page: Page, role = 'super_admin', ready = false, providers = [{ provider: 'Gmail', total: 20 }]) {
+  const total = providers.reduce((sum, item) => sum + item.total, 0)
   const state = { ready, migrated: 0, posts: 0, reads: 0, delay: 0, fail: false }
   const status = () => ({
     globalKeyConfigured: state.ready, globalKeyReady: state.ready,
     keyId: state.ready ? '0123456789abcdef0123456789abcdef' : null,
-    total: 20, migrated: state.migrated, pending: 20 - state.migrated,
-    providers: [{ provider: 'Gmail', total: 20, migrated: state.migrated, pending: 20 - state.migrated, legacyKeyReady: true }],
+    total, migrated: state.migrated, pending: total - state.migrated,
+    providers: providers.map((item, index) => {
+      const before = providers.slice(0, index).reduce((sum, previous) => sum + previous.total, 0)
+      const migrated = Math.min(item.total, Math.max(0, state.migrated - before))
+      return { ...item, migrated, pending: item.total - migrated, legacyKeyReady: true }
+    }),
   })
   await page.addInitScript(() => {
     localStorage.setItem('omnimail.deployment-guide.v1', 'seen')
@@ -37,9 +42,9 @@ async function setup(page: Page, role = 'super_admin', ready = false) {
       state.posts++
       expect(route.request().postDataJSON()).toMatchObject({ confirm: true, keyId: '0123456789abcdef0123456789abcdef' })
       if (state.delay) await new Promise((resolve) => setTimeout(resolve, state.delay))
-      if (!state.fail) state.migrated = Math.min(20, state.migrated + 10)
+      if (!state.fail) state.migrated = Math.min(total, state.migrated + 10)
       return json(route, {
-        cursor: state.migrated < 20 && !state.fail ? { field: 3, afterId: 'batch-1' } : null,
+        cursor: state.migrated < total && !state.fail ? { field: 3, afterId: 'batch-1' } : null,
         scanned: 10, migrated: state.fail ? 0 : 10, failed: state.fail ? 10 : 0, conflicts: 0, status: status(),
       })
     }
@@ -54,6 +59,39 @@ async function enterMigration(page: Page) {
   await expect(introduction.getByRole('progressbar')).toHaveCount(0)
   await introduction.getByRole('button', { name: '开始设置', exact: true }).click()
   return page.getByRole('dialog', { name: '统一邮箱加密密钥' })
+}
+
+for (const viewport of [{ width: 900, height: 775 }, { width: 375, height: 667 }, { width: 812, height: 375 }, { width: 320, height: 568 }]) {
+  test(`七种邮箱迁移在 ${viewport.width}×${viewport.height} 下正文独立滚动，按钮完整可见`, async ({ page }) => {
+    await page.setViewportSize(viewport)
+    await page.emulateMedia({ reducedMotion: 'reduce', colorScheme: viewport.width === 375 ? 'dark' : 'light' })
+    await setup(page, 'super_admin', true, [
+      { provider: 'iCloud', total: 6 }, { provider: 'Linux DO Mail', total: 1 }, { provider: 'Gmail', total: 2 },
+      { provider: 'Microsoft', total: 27 }, { provider: 'QQ Mail', total: 1 }, { provider: 'NAVER Mail', total: 1 }, { provider: 'Yandex Mail', total: 1 },
+    ])
+    await page.goto('/')
+    const dialog = await enterMigration(page)
+    // 模拟其他懒加载页面随后注入共享样式，覆盖线上出现过的加载顺序。
+    await page.addStyleTag({ path: 'src/features/deployment/styles/deployment-wizard.css' })
+    await page.addStyleTag({ path: 'src/features/deployment/styles/deployment-wizard-responsive.css' })
+    const body = dialog.locator('.mail-key-body')
+    expect(await body.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true)
+    expect(await dialog.evaluate((element) => getComputedStyle(element).backgroundColor)).toMatch(/^rgb\(/)
+    expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true)
+    for (const name of ['关闭', '暂不迁移', '重新检查配置', '开始 / 继续迁移']) {
+      const button = dialog.getByRole('button', { name, exact: true })
+      await expect(button).toBeInViewport({ ratio: 1 })
+      const box = (await button.boundingBox())!
+      expect(box.y).toBeGreaterThanOrEqual(0)
+      expect(box.y + box.height).toBeLessThanOrEqual(viewport.height)
+    }
+    const footer = dialog.locator('footer')
+    const before = await footer.boundingBox()
+    await body.evaluate((element) => { element.scrollTop = element.scrollHeight })
+    expect(await footer.boundingBox()).toEqual(before)
+    await body.evaluate((element) => { element.scrollTop = 0 })
+    await page.screenshot({ path: `test-results/mail-credentials-${viewport.width}x${viewport.height}.png`, fullPage: true })
+  })
 }
 
 test('主管理员首页引导配置后主动迁移，完成前不会自动写入', async ({ page }) => {

@@ -11,13 +11,17 @@ export function serviceBackoff(now = Date.now()): ServiceBackoff | undefined {
 export function recordServiceBackoff(data: unknown, now = Date.now()): ServiceBackoff | undefined {
   if (!data || typeof data !== 'object') return undefined
   const value = data as Record<string, unknown>
-  if (value.code !== 'd1_daily_limit') return undefined
+  // 旧后端可能直接透传 Cloudflare 英文错误；只识别明确的日额度错误，避免误判超时或存储上限。
+  const legacyMessage = typeof value.error === 'string' ? value.error : ''
+  const legacyQuota = legacyMessage.length <= 4096
+    && /\b(?:Your account has exceeded D1['’]s free tier daily row (?:read|write) limit|D1 daily operation limit exceeded)\b/i.test(legacyMessage)
+  if (value.code !== 'd1_daily_limit' && !legacyQuota) return undefined
   const seconds = typeof value.retryAfterSeconds === 'number' && Number.isFinite(value.retryAfterSeconds)
     ? Math.min(300, Math.max(1, Math.ceil(value.retryAfterSeconds))) : 30
   const resetAt = typeof value.resetAt === 'number' && Number.isFinite(value.resetAt)
     && value.resetAt > now && value.resetAt <= now + 2 * 86_400_000
     ? value.resetAt : Math.floor(now / 86_400_000) * 86_400_000 + 86_400_000
-  current = { until: now + seconds * 1000, resetAt }
+  current = { until: Math.min(now + seconds * 1000, resetAt), resetAt }
   return current
 }
 
