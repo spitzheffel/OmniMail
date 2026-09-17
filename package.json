@@ -32,7 +32,7 @@
     "check:lines": "node scripts/check-file-lines.mjs",
     "lint": "oxlint src extension/src",
     "docs:api": "node scripts/generate-api-docs.mjs",
-    "check": "npm run check:lines && npm run lint && tsc --noEmit --pretty false && tsc -p email-worker/tsconfig.json --noEmit --pretty false && tsc -p email-worker/tsconfig.integration.json --noEmit --pretty false",
+    "check": "npm run check:lines && npm run lint && tsc --noEmit --pretty false && tsc -p email-worker/tsconfig.json --noEmit --pretty false && tsc -p email-worker/tsconfig.integration.json --noEmit --pretty false && tsc -p e2e/tsconfig.json --noEmit --pretty false",
     "test": "vitest run",
     "test:worker": "vitest run --config vitest.worker.config.ts",
     "test:extension": "node scripts/extension-smoke.mjs",

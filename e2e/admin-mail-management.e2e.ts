@@ -1,4 +1,5 @@
 import { expect, type Page, type Route, test } from '@playwright/test'
+import { expectTransientStateSeen, watchTransientState } from './transient-state'
 
 function json(route: Route, body: unknown, status = 200) {
   return route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) })
@@ -118,9 +119,10 @@ test('owner can inspect and manage another user message without changing read st
       (image as HTMLImageElement).naturalWidth
     ))).toBe(1)
   expect(state.personalUpdates).toBe(0)
+  await watchTransientState(backdrop, 'data-backdrop-closing-seen', '[data-state="closing"]')
   await dialog.getByRole('button', { name: '关闭' }).click()
-  await expect(backdrop).toHaveAttribute('data-state', 'closing')
   await expect(backdrop).toHaveCount(0)
+  await expectTransientStateSeen(page, 'data-backdrop-closing-seen')
   await page.getByRole('button', { name: 'Private project update' }).click()
   await page.getByRole('dialog', { name: '全站邮件详情' })
     .getByRole('button', { name: '移入垃圾箱' }).click()

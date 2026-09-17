@@ -51,6 +51,10 @@ async function mockWorkspaceSettings(page: Page) {
 }
 
 test('system settings control optional mailbox workspace entries', async ({ page }) => {
+  // Seven full page loads in one test; the default 30s budget runs out when the
+  // suite fills every worker, which surfaces as a timeout on whatever step is
+  // unlucky rather than as a defect.
+  test.slow()
   const state = await mockWorkspaceSettings(page)
   await page.goto('/admin/settings')
   const deploymentLaunch = page.getByRole('button', { name: /部署初始化向导/ })

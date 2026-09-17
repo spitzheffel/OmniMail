@@ -1,4 +1,5 @@
 import { expect, type Page, type Route, test } from '@playwright/test'
+import { expectTransientStateSeen, watchTransientState } from './transient-state'
 
 function json(route: Route, body: unknown, status = 200) {
   return route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) })
@@ -306,10 +307,11 @@ test('connects Gmail, marks opened mail read, and preserves controlled IMAP beha
   expect(await dialogBackdrop.locator('.gmail-account-dialog').evaluate((element) => (
     getComputedStyle(element).transitionDuration
   ))).not.toBe('0s')
+  await watchTransientState(dialogBackdrop, 'data-gmail-dialog-closing-seen',
+    '.is-closing:not(.is-visible)')
   await page.getByRole('button', { name: '关闭' }).click()
-  await expect(dialogBackdrop).toHaveClass(/is-closing/)
-  await expect(dialogBackdrop).not.toHaveClass(/is-visible/)
   await expect(dialogBackdrop).toHaveCount(0)
+  await expectTransientStateSeen(page, 'data-gmail-dialog-closing-seen')
   await expect(page.getByText('安全提醒')).toBeVisible()
   await expect(page.locator('.gmail-mail-view.icloud-mail-view')).toBeVisible()
   await expect(page.locator('.gmail-message-list .message-row')).toHaveCount(30)

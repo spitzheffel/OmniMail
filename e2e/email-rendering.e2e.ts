@@ -1,10 +1,68 @@
-import { expect, type Route, test } from '@playwright/test'
+import { expect, type Page, type Route, test } from '@playwright/test'
 import { message, user } from './omnimail-fixtures'
 
 function json(route: Route, body: unknown) {
   return route.fulfill({
     contentType: 'application/json',
     body: JSON.stringify(body),
+  })
+}
+
+declare global {
+  interface Window { __typewriterPhases?: ('typing' | 'idle')[] }
+}
+
+/**
+ * `is-typing` is set when the typewriter effect starts and cleared on the first
+ * animation frame that reports completion. On a loaded machine that whole window
+ * can close inside a single task, so a polling assertion samples the DOM and
+ * misses it — which is what made this test flaky at six workers. Recording every
+ * mutation instead cannot miss a transition, however short it is.
+ */
+async function watchTypewriterPhases(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    const phases: ('typing' | 'idle')[] = []
+    window.__typewriterPhases = phases
+    const note = (className: string) => {
+      const phase = className.includes('is-typing') ? 'typing' : 'idle'
+      if (phases[phases.length - 1] !== phase) phases.push(phase)
+    }
+    const live = () => document.querySelector('.reader-toolbar__typewriter')
+    const mounted = live()
+    if (mounted) note(mounted.className)
+    new MutationObserver((records) => {
+      for (const record of records) {
+        const target = record.target as Element
+        if (record.type === 'attributes' && typeof record.oldValue === 'string'
+          && target.classList?.contains('reader-toolbar__typewriter')) note(record.oldValue)
+        // The span is re-parented when the subject pins, so a remount can carry
+        // the class in without ever mutating an attribute.
+        for (const added of Array.from(record.addedNodes)) {
+          if (!(added instanceof Element)) continue
+          const node = added.matches('.reader-toolbar__typewriter')
+            ? added
+            : added.querySelector('.reader-toolbar__typewriter')
+          if (node) note(node.className)
+        }
+      }
+      const current = live()
+      if (current) note(current.className)
+    }).observe(document.body, {
+      subtree: true, childList: true, attributes: true,
+      attributeFilter: ['class'], attributeOldValue: true,
+    })
+  })
+}
+
+/** Phases seen since the last drain; the final one seeds the next window. */
+function drainTypewriterPhases(page: Page): Promise<('typing' | 'idle')[]> {
+  return page.evaluate(() => {
+    const phases = window.__typewriterPhases ?? []
+    const seen = phases.slice()
+    // Trim in place: the observer closed over this array, so replacing it would
+    // silently orphan the recorder after the first drain.
+    phases.splice(0, Math.max(0, phases.length - 1))
+    return seen
   })
 }
 
@@ -96,30 +154,37 @@ test('slow remote images do not block readable email content', async ({ page }) 
     await reader.evaluate((element) => { element.scrollTop = 0 })
     await expect(toolbarTypewriter).toHaveText('邮件详情')
     await page.emulateMedia({ colorScheme: 'dark', reducedMotion: 'no-preference' })
+    await watchTypewriterPhases(page)
     await reader.evaluate((element) => { element.scrollTop = element.scrollHeight })
     const toolbarSubject = page.getByRole('button', { name: `回到顶部：${subject}` })
     const scrollTopButton = page.locator('.reader-scroll-top')
     await expect(toolbarSubject).toBeVisible()
-    await expect(toolbarTypewriter).toHaveClass(/is-typing/)
     await expect(toolbarTypewriter).toHaveText(subject)
     await expect(toolbarTypewriter).not.toHaveClass(/is-typing/)
+    expect(await drainTypewriterPhases(page)).toContain('typing')
     await expect(scrollTopButton).toHaveClass(/is-visible/)
     await toolbarSubject.click()
     await expect.poll(() => reader.evaluate((element) => element.scrollTop)).toBe(0)
     await expect(toolbarSubject).toHaveCount(0)
-    await expect(toolbarTypewriter).toHaveClass(/is-typing/)
     await expect(toolbarTypewriter).toHaveText('邮件详情')
     await expect(toolbarTypewriter).not.toHaveClass(/is-typing/)
+    expect(await drainTypewriterPhases(page)).toContain('typing')
     await reader.evaluate((element) => { element.scrollTop = element.scrollHeight })
-    await expect(toolbarTypewriter).toHaveClass(/is-typing/)
+    // The pinned button appears with subjectPinned, independent of the
+    // animation, so it is a deterministic point to scroll back from.
+    await expect(toolbarSubject).toBeVisible()
     await reader.evaluate((element) => { element.scrollTop = 0 })
     await expect(toolbarSubject).toHaveCount(0)
     await expect(toolbarTypewriter).toHaveText('邮件详情')
     await expect(toolbarTypewriter).not.toHaveClass(/is-typing/)
+    expect(await drainTypewriterPhases(page)).toContain('typing')
     await page.emulateMedia({ colorScheme: 'dark', reducedMotion: 'reduce' })
     await reader.evaluate((element) => { element.scrollTop = element.scrollHeight })
     await expect(toolbarTypewriter).toHaveText(subject)
     await expect(toolbarTypewriter).not.toHaveClass(/is-typing/)
+    // Reduced motion must swap the title outright. The recorder proves it never
+    // entered the typing phase, which the final class check alone cannot.
+    expect(await drainTypewriterPhases(page)).not.toContain('typing')
     await expect(scrollTopButton).toHaveClass(/is-visible/)
     await scrollTopButton.click()
     await expect.poll(() => reader.evaluate((element) => element.scrollTop)).toBe(0)

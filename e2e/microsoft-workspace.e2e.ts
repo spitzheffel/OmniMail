@@ -1,4 +1,11 @@
 import { expect, type Page, type Route, test } from '@playwright/test'
+import { expectTransientStateSeen, watchTransientState } from './transient-state'
+
+declare global {
+  interface Window {
+    __importLayout?: { rows: number; preview: number; button: number }[]
+  }
+}
 
 function json(route: Route, body: unknown, status = 200) {
   return route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) })
@@ -77,7 +84,10 @@ test('previews Microsoft OAuth2 formats without echoing secrets', async ({ page 
     }
     if (path === '/api/microsoft/accounts/import' && request.method() === 'POST') {
       const body = request.postDataJSON() as { accounts: unknown[] }
-      await new Promise((resolve) => setTimeout(resolve, 250))
+      // The mid-import assertions below sample a window that only exists while
+      // an item is in flight. 250ms per item was tight enough that a loaded
+      // machine could finish the whole batch between polls.
+      await new Promise((resolve) => setTimeout(resolve, 400))
       imports.push(...body.accounts)
       connected = true
       return json(route, { results: body.accounts.map((_item, index) => ({
@@ -161,16 +171,35 @@ test('previews Microsoft OAuth2 formats without echoing secrets', async ({ page 
   await expect(progress.getByRole('progressbar')).toBeVisible()
   await expect(preview.locator('.microsoft-import-item-status.is-running')).toHaveCount(1)
   await expect(preview.locator('.microsoft-import-item-status.is-success')).toHaveCount(1)
-  const runningPreviewHeight = await preview.evaluate((element) => element.getBoundingClientRect().height)
-  const runningButtonTop = await dialog.getByRole('button', { name: '正在逐项导入' })
-    .evaluate((element) => element.getBoundingClientRect().top)
-  await expect(preview.locator('li')).toHaveCount(2)
-  await expect.poll(() => preview.evaluate((element) => element.getBoundingClientRect().height))
-    .toBe(runningPreviewHeight)
-  await expect.poll(() => dialog.getByRole('button', { name: '正在逐项导入' })
-    .evaluate((element) => element.getBoundingClientRect().top)).toBe(runningButtonTop)
+  // Rows are removed as they are accepted and the running footer disappears at
+  // completion, so polling for one mid-import frame can land after the run is
+  // already over. Record every layout change instead, then assert over the log.
+  await dialog.evaluate((element) => {
+    const samples: NonNullable<Window['__importLayout']> = []
+    window.__importLayout = samples
+    const sample = () => {
+      const card = element.querySelector('.microsoft-import-preview')
+      const button = element.querySelector('footer button[disabled]')
+      if (!card || !button) return
+      samples.push({
+        rows: card.querySelectorAll('li').length,
+        preview: Math.round(card.getBoundingClientRect().height),
+        button: Math.round(button.getBoundingClientRect().top),
+      })
+    }
+    sample()
+    new MutationObserver(sample)
+      .observe(element, { attributes: true, childList: true, subtree: true })
+  })
   await expect.poll(() => imports).toHaveLength(3)
   await expect(progress).toHaveCount(0)
+  // Only frames that still carry the disabled running footer are recorded, so
+  // every sample below belongs to the import run rather than to its aftermath.
+  const layout = await page.evaluate(() => window.__importLayout ?? [])
+  expect(layout.length).toBeGreaterThan(0)
+  expect(Math.min(...layout.map((entry) => entry.rows))).toBeLessThan(3)
+  expect([...new Set(layout.map((entry) => entry.preview))]).toHaveLength(1)
+  expect([...new Set(layout.map((entry) => entry.button))]).toHaveLength(1)
   await expect(dialog.getByText('导入完成', { exact: true })).toBeVisible()
   await expect(dialog.getByText('成功 3 个，失败 0 个。')).toBeVisible()
   await expect.poll(() => dialog.evaluate((element) => element.getBoundingClientRect().height))
@@ -187,9 +216,10 @@ test('previews Microsoft OAuth2 formats without echoing secrets', async ({ page 
   ])
   expect(Object.prototype.hasOwnProperty.call(imports[2], 'password')).toBe(false)
   const backdrop = page.locator('.microsoft-dialog-backdrop')
+  await watchTransientState(backdrop, 'data-microsoft-dialog-closing-seen', '.is-closing')
   await dialog.getByRole('button', { name: '关闭' }).click()
-  await expect(backdrop).toHaveClass(/is-closing/)
   await expect(backdrop).toHaveCount(0)
+  await expectTransientStateSeen(page, 'data-microsoft-dialog-closing-seen')
 })
 
 test('bulk-manages and disconnects selected Microsoft accounts', async ({ page }) => {

@@ -1,4 +1,5 @@
 import { expect, type Page, type Route, test } from '@playwright/test'
+import { expectTransientStateSeen, watchTransientState } from './transient-state'
 
 function json(route: Route, body: unknown) {
   return route.fulfill({ contentType: 'application/json', body: JSON.stringify(body) })
@@ -172,10 +173,14 @@ test('connects a Linux DO mailbox with username and password and reads mail', as
   await newPassword.fill('rotated-test-token')
   await credentialDialog.getByRole('button', { name: '显示密码' }).click()
   await expect(newPassword).toHaveAttribute('type', 'text')
-  await credentialDialog.getByRole('button', { name: '验证并更新' }).click()
-  await expect(credentialDialog.locator('.lucide-loader-circle.spin')).toBeVisible()
-  await expect(credentialDialog.locator('.lucide-key-round')).toHaveCount(0)
+  const updateButton = credentialDialog.getByRole('button', { name: '验证并更新' })
+  // Scoped to the button: the dialog keeps other key icons, so a dialog-wide
+  // count could only reach zero after it closed — that assertion was vacuous.
+  await watchTransientState(updateButton, 'data-credential-pending-seen',
+    ':has(.lucide-loader-circle.spin):not(:has(.lucide-key-round))')
+  await updateButton.click()
   await expect.poll(() => state.credentialUpdates).toEqual([{ password: 'rotated-test-token' }])
+  await expectTransientStateSeen(page, 'data-credential-pending-seen')
   await expect(credentialDialog).toBeHidden()
   await expect(accountTrigger).toBeFocused()
   await expect(page.getByRole('status')).toContainText('认证令牌已更新')
@@ -193,10 +198,12 @@ test('connects a Linux DO mailbox with username and password and reads mail', as
   await composeDialog.getByLabel('收件人').fill('recipient@example.com')
   await composeDialog.getByLabel('主题').fill('来自 Linux DO 的问候')
   await composeDialog.getByLabel('正文').fill('这是一封队列发送测试邮件。')
-  await composeDialog.getByRole('button', { name: '发送邮件' }).click()
-  await expect(composeDialog.locator('.lucide-loader-circle.spin')).toBeVisible()
-  await expect(composeDialog.locator('.lucide-send')).toHaveCount(0)
+  const sendButton = composeDialog.getByRole('button', { name: '发送邮件' })
+  await watchTransientState(sendButton, 'data-compose-pending-seen',
+    ':has(.lucide-loader-circle.spin):not(:has(.lucide-send))')
+  await sendButton.click()
   await expect.poll(() => state.sentMessages).toHaveLength(1)
+  await expectTransientStateSeen(page, 'data-compose-pending-seen')
   expect(state.sentMessages[0]).toMatchObject({
     to: 'recipient@example.com',
     subject: '来自 Linux DO 的问候',
