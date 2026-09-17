@@ -420,8 +420,8 @@ export function ICloudWorkspace({ userId, enabled, remoteImagesEnabled }: {
 
       {addOpen && <AddICloudAccountDialog onClose={() => setAddOpen(false)} onChanged={loadAccounts} onCreated={(account) => { setAccounts((items) => items.some((item) => item.id === account.id) ? items.map((item) => item.id === account.id ? account : item) : [...items, account]); if (account.hasCookies || account.hasAppPassword || account.hasAppleAccount) setSelectedId(account.id); setNotice(t('iCloud 账号已添加')) }} />}
       {createOpen && selected && <ICloudModal title={t('创建隐藏邮箱')} description={selected.hasAppleAccount
-        ? t('Apple Account 会在提交时直接创建地址，一次最多提交 {max} 个项目。', { max: selected.hasCookies ? 25 : 20 })
-        : t('预览 Apple 生成的地址，确认后一次创建最多 5 个。')} onClose={() => setCreateOpen(false)}>{(close) => <ICloudAliasBatchForm account={selected} close={close} onCreated={async (createdAliases) => { const latest = createdAliases.at(-1); if (!latest) return; setSelectedAlias(latest.email); setNotice(t(createdAliases.length === 1 ? '新的隐藏邮箱已创建' : '已创建 {count} 个隐藏邮箱', { count: createdAliases.length })); await sync(latest.email, true) }} />}</ICloudModal>}
+        ? t('Apple Account 会在提交时直接创建地址；本小时剩余额度显示在表单里。')
+        : t('预览 Apple 生成的地址，确认后再创建；本小时剩余额度显示在表单里。')} onClose={() => setCreateOpen(false)}>{(close) => <ICloudAliasBatchForm account={selected} close={close} onCreated={async (createdAliases) => { const latest = createdAliases.at(-1); if (!latest) return; setSelectedAlias(latest.email); setNotice(t(createdAliases.length === 1 ? '新的隐藏邮箱已创建' : '已创建 {count} 个隐藏邮箱', { count: createdAliases.length })); await sync(latest.email, true) }} />}</ICloudModal>}
       {credentials && <ICloudAccountSettingsDialog account={credentials} onClose={() => setCredentials(null)} onChanged={async () => { clearICloudAccountCache(userId, credentials.id); await loadAccounts() }} onDeleted={async () => { clearICloudAccountCache(userId, credentials.id); await loadAccounts(); setAliases([]); setMessages([]); setInboxMethod('') }} onNotice={setNotice} />}
       {notice && <div className="toast" role="status"><Check size={16} />{notice}</div>}
     </div>

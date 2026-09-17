@@ -161,3 +161,42 @@ describe('iCloud Hide My Email response parsing', () => {
       .rejects.toMatchObject({ status: 422 })
   })
 })
+describe('legacy Hide My Email failure classification', () => {
+  it('marks an explicit refusal definitive and keeps its reason out of the message', async () => {
+    vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(validationResponse())
+      .mockResolvedValueOnce(Response.json({ success: false, error: 'Service unavailable in region' }))
+
+    const error = await new ICloudClient({ session: 'value' }, 'icloud.com')
+      .createAlias('Shop').catch((reason) => reason)
+
+    expect(error).toBeInstanceOf(ICloudRemoteError)
+    // definitive === true tells the caller nothing was reserved upstream, so the
+    // hourly slot can safely be refunded.
+    expect(error).toMatchObject({ definitive: true, detail: 'Service unavailable in region' })
+    // The message stays an exact t() key; the reason rides along in `detail`.
+    expect((error as ICloudRemoteError).message).toBe('iCloud 无法生成隐藏邮箱。')
+  })
+
+  it('recognises the hourly cap from Apple prose', async () => {
+    vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(validationResponse())
+      .mockResolvedValueOnce(Response.json({
+        success: false, error: 'You have reached the limit of addresses you can create.',
+      }))
+
+    await expect(new ICloudClient({ session: 'value' }, 'icloud.com').createAlias('Shop'))
+      .rejects.toMatchObject({ status: 429, code: 'icloud_web_hme_limit' })
+  })
+
+  it('leaves a timeout non-definitive so the reservation is not refunded', async () => {
+    vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(validationResponse())
+      .mockRejectedValue(new DOMException('timed out', 'TimeoutError'))
+
+    const error = await new ICloudClient({ session: 'value' }, 'icloud.com')
+      .createAlias('Shop').catch((reason) => reason)
+
+    expect(error).toMatchObject({ status: 504, definitive: false })
+  })
+})

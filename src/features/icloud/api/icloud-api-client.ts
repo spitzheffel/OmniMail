@@ -1,4 +1,7 @@
-import type { AppleAccountState, ICloudAccount, ICloudAlias, ICloudHost, ICloudMessage } from '../../../shared/api/api-types'
+import type {
+  AppleAccountState, ICloudAccount, ICloudAlias, ICloudAliasChannel,
+  ICloudAliasQuotaChannel, ICloudHost, ICloudMessage,
+} from '../../../shared/api/api-types'
 
 type Request = <T>(path: string, init?: RequestInit) => Promise<T>
 
@@ -73,16 +76,26 @@ export function createICloudApi(request: Request, jsonBody: (value: unknown) => 
       '/api/icloud/aliases/preview',
       { method: 'POST', body: jsonBody({ accountId }) },
     ),
-    createICloudAlias: (
-      accountId: string,
-      label: string,
-      email?: string,
-      previewId?: string,
-    ) => request<{
+    iCloudAliasQuota: (accountId: string, signal?: AbortSignal) => request<{
+      channels: ICloudAliasQuotaChannel[]
+    }>(
+      `/api/icloud/aliases/quota?accountId=${encodeURIComponent(accountId)}`,
+      { signal },
+    ),
+    createICloudAlias: (input: {
+      accountId: string
+      label: string
+      /** Sent explicitly so the server never has to discover the channel by failing. */
+      channel: ICloudAliasChannel
+      email?: string
+      previewId?: string
+    }) => request<{
       alias: Pick<ICloudAlias, 'email' | 'label' | 'createdAt'>
+      channel: ICloudAliasChannel
+      remaining: number
     }>(
       '/api/icloud/aliases',
-      { method: 'POST', body: jsonBody({ accountId, label, email, previewId }) },
+      { method: 'POST', body: jsonBody(input) },
     ),
     updateICloudAlias: (
       anonymousId: string,

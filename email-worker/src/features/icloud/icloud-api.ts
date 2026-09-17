@@ -21,12 +21,20 @@ import type { ICloudAccount, ICloudAlias } from './icloud-types'
 import type { Env, SessionUser } from '../../app/types'
 export {
   createICloudAlias,
+  getICloudAliasQuota,
   deleteICloudAppleAccount,
   refreshICloudAppleAccount,
   updateICloudAppleAccount,
 } from './icloud-account-api'
 function responseError(error: unknown): Response {
-  if (error instanceof ICloudStoreError || error instanceof ICloudRemoteError) {
+  if (error instanceof ICloudRemoteError) {
+    // `detail` stays out of `error` so the client can still translate it.
+    return Response.json(
+      error.detail ? { error: error.message, detail: error.detail } : { error: error.message },
+      { status: error.status },
+    )
+  }
+  if (error instanceof ICloudStoreError) {
     return Response.json({ error: error.message }, { status: error.status })
   }
   console.error('iCloud request failed', error)

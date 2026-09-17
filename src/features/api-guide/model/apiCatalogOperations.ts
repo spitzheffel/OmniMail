@@ -84,6 +84,13 @@ export const iCloudEndpoints: ApiEndpoint[] = [
     examplePath: '/api/icloud/aliases?accountId=icloud_account_id',
   },
   {
+    method: 'GET', path: '/api/icloud/aliases/quota', group: 'icloud', auth: 'authenticated',
+    title: l('查询隐藏邮箱创建额度', 'Read Hide My Email creation quota'),
+    description: l('返回该账户两条创建通道本小时的额度、已用量和恢复时间。', 'Return this hour\'s limit, usage and reset time for both creation channels of the account.'),
+    request: 'Query · accountId', response: '200 · { channels: [{ channel, available, limit, used, remaining, resetsAt }] }',
+    examplePath: '/api/icloud/aliases/quota?accountId=icloud_account_id',
+  },
+  {
     method: 'POST', path: '/api/icloud/aliases/preview', group: 'icloud', auth: 'authenticated',
     title: l('预览隐藏邮箱地址', 'Preview a Hide My Email address'),
     description: l('让 Apple 生成一个尚未创建的候选隐藏邮箱地址。', 'Ask Apple for a suggested Hide My Email address without creating it.'),
@@ -94,8 +101,9 @@ export const iCloudEndpoints: ApiEndpoint[] = [
     method: 'POST', path: '/api/icloud/aliases', group: 'icloud', auth: 'authenticated',
     title: l('创建隐藏邮箱地址', 'Create a Hide My Email alias'),
     description: l('在指定 iCloud 账户中创建带标签的隐藏地址。', 'Create a labeled Hide My Email alias in the selected iCloud account.'),
-    request: 'JSON · accountId, label?, email?, previewId?', response: '201 · { alias }',
-    exampleBody: { accountId: 'icloud_account_id', label: 'Shopping', email: 'suggested@icloud.com', previewId: '00000000-0000-4000-8000-000000000001' },
+    request: 'JSON · accountId, label?, channel?=apple_account|icloud_web, email?, previewId?',
+    response: '201 · { alias, channel, remaining }',
+    exampleBody: { accountId: 'icloud_account_id', label: 'Shopping', channel: 'apple_account' },
   },
   {
     method: 'PATCH', path: '/api/icloud/aliases/:anonymousId', group: 'icloud', auth: 'authenticated',

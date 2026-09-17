@@ -58,11 +58,17 @@ import { createMailApi } from '../../features/mailbox/api/mail-api-client'
 export class ApiError extends Error {
   status: number
   readonly quota?: ServiceBackoff
+  /**
+   * Untranslated upstream wording the server kept out of `error` so the message
+   * itself stays a valid t() key. Rendered verbatim after the message.
+   */
+  readonly detail?: string
 
-  constructor(message: string, status: number, quota?: ServiceBackoff) {
+  constructor(message: string, status: number, quota?: ServiceBackoff, detail?: string) {
     super(message)
     this.status = status
     this.quota = quota
+    this.detail = detail
   }
 }
 
@@ -95,7 +101,7 @@ export async function request<T>(path: string, init: RequestOptions = {}): Promi
     }
     throw error
   }
-  const data = await response.json().catch(() => ({})) as { error?: string }
+  const data = await response.json().catch(() => ({})) as { error?: string; detail?: string }
   if (!response.ok) {
     const backoff = response.status >= 500 || response.status === 429 ? recordServiceBackoff(data) : undefined
     if (backoff) throw new ApiError(serviceBackoffMessage(backoff), response.status, backoff)
@@ -105,6 +111,8 @@ export async function request<T>(path: string, init: RequestOptions = {}): Promi
     throw new ApiError(
       data.error ? t(data.error) : t('请求失败（{status}）', { status: response.status }),
       response.status,
+      undefined,
+      typeof data.detail === 'string' ? data.detail.slice(0, 300) : undefined,
     )
   }
   return data as T

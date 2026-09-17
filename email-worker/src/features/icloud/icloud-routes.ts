@@ -11,6 +11,7 @@ import {
   deleteICloudAccount,
   deleteICloudAppleAccount,
   deleteICloudAlias,
+  getICloudAliasQuota,
   getICloudMessage,
   listICloudAccounts,
   listICloudAliases,
@@ -118,6 +119,9 @@ iCloudRoutes.post('/icloud/aliases', (context) => (
     context.req.raw,
     clientIp(context.req.raw.headers),
   )
+))
+iCloudRoutes.get('/icloud/aliases/quota', (context) => (
+  getICloudAliasQuota(context.env, context.get('user'), context.req.raw)
 ))
 iCloudRoutes.post('/icloud/aliases/preview', (context) => (
   previewICloudAlias(context.env, context.get('user'), context.req.raw)

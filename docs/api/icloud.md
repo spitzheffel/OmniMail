@@ -8,7 +8,7 @@ iCloud 账号、凭据、隐藏地址和按需收件箱。
 
 > iCloud accounts, credentials, aliases, and on-demand inbox access.
 
-本分类共 **18** 个端点。返回 [完整 API 索引](README.md) 或 [API 架构与安全说明](../API.md)。
+本分类共 **19** 个端点。返回 [完整 API 索引](README.md) 或 [API 架构与安全说明](../API.md)。
 
 <!-- endpoint:GET /api/icloud/accounts catalog:82cd25d54b99 -->
 ## `GET /api/icloud/accounts`
@@ -337,6 +337,29 @@ curl --request GET \
   --header "Authorization: Bearer om_at_..."
 ```
 
+<!-- endpoint:GET /api/icloud/aliases/quota catalog:b23738a78c57 -->
+## `GET /api/icloud/aliases/quota`
+
+**查询隐藏邮箱创建额度 / Read Hide My Email creation quota**
+
+返回该账户两条创建通道本小时的额度、已用量和恢复时间。
+
+> Return this hour's limit, usage and reset time for both creation channels of the account.
+
+| 项目 | 内容 |
+| --- | --- |
+| 认证 | 登录用户；支持 Session Cookie 或 Access Token |
+| 请求 | Query · accountId |
+| 成功响应 | 200 · { channels: [{ channel, available, limit, used, remaining, resetsAt }] } |
+
+### cURL 示例
+
+```bash
+curl --request GET \
+  --url "https://mail.example.com/api/icloud/aliases/quota?accountId=icloud_account_id" \
+  --header "Authorization: Bearer om_at_..."
+```
+
 <!-- endpoint:POST /api/icloud/aliases/preview catalog:5546549e780d -->
 ## `POST /api/icloud/aliases/preview`
 
@@ -364,7 +387,7 @@ curl --request POST \
 }'
 ```
 
-<!-- endpoint:POST /api/icloud/aliases catalog:ad957a7191ec -->
+<!-- endpoint:POST /api/icloud/aliases catalog:26a39612014a -->
 ## `POST /api/icloud/aliases`
 
 **创建隐藏邮箱地址 / Create a Hide My Email alias**
@@ -376,8 +399,8 @@ curl --request POST \
 | 项目 | 内容 |
 | --- | --- |
 | 认证 | 登录用户；支持 Session Cookie 或 Access Token |
-| 请求 | JSON · accountId, label?, email?, previewId? |
-| 成功响应 | 201 · { alias } |
+| 请求 | JSON · accountId, label?, channel?=apple_account\|icloud_web, email?, previewId? |
+| 成功响应 | 201 · { alias, channel, remaining } |
 
 ### cURL 示例
 
@@ -389,8 +412,7 @@ curl --request POST \
   --data '{
   "accountId": "icloud_account_id",
   "label": "Shopping",
-  "email": "suggested@icloud.com",
-  "previewId": "00000000-0000-4000-8000-000000000001"
+  "channel": "apple_account"
 }'
 ```
 

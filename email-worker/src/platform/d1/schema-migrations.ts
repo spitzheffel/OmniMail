@@ -2,15 +2,10 @@ import { NOTIFICATION_MIGRATION, NOTIFICATION_RECOVERY } from './schema-migratio
 import { MESSAGE_READ_MIGRATION, MESSAGE_READ_RECOVERY } from './schema-migration-message-reads'
 import { NAVER_MAIL_MIGRATION, NAVER_MAIL_RECOVERY } from './schema-migration-naver'
 import { YANDEX_MAIL_MIGRATION, YANDEX_MAIL_RECOVERY } from './schema-migration-yandex'
-import {
-  QQ_MAIL_IDENTITIES_MIGRATION,
-  QQ_MAIL_IDENTITIES_RECOVERY,
-} from './schema-migration-qq-identities'
-import {
-  EXTERNAL_MAIL_INDEX_MIGRATION,
-  EXTERNAL_MAIL_INDEX_RECOVERY,
-} from './schema-migration-external-mail'
+import { QQ_MAIL_IDENTITIES_MIGRATION, QQ_MAIL_IDENTITIES_RECOVERY } from './schema-migration-qq-identities'
+import { EXTERNAL_MAIL_INDEX_MIGRATION, EXTERNAL_MAIL_INDEX_RECOVERY } from './schema-migration-external-mail'
 import { ICLOUD_APPLE_ACCOUNT_MIGRATION, ICLOUD_APPLE_ACCOUNT_RECOVERY } from './schema-migration-icloud-apple'
+import { ICLOUD_ALIAS_QUOTA_MIGRATION, ICLOUD_ALIAS_QUOTA_RECOVERY } from './schema-migration-icloud-alias-quota'
 const ICLOUD_MIGRATION = '0021_icloud_accounts.sql'; const CONSISTENCY_MIGRATION = '0022_consistency_guards.sql'
 const LINUX_DO_MAIL_MIGRATION = '0023_linux_do_mail_accounts.sql'
 const LINUX_DO_MAIL_OUTBOUND_MIGRATION = '0024_linux_do_mail_outbound.sql'
@@ -20,7 +15,7 @@ const MICROSOFT_MIGRATION = '0027_microsoft_imap.sql'
 const MICROSOFT_COMBINATION_PASSWORD_MIGRATION = '0028_microsoft_oauth_combination_password.sql'
 const QQ_MAIL_MIGRATION = '0029_qq_mail_imap.sql'
 const QQ_MAIL_SMTP_MIGRATION = '0030_qq_mail_smtp.sql'
-export const REQUIRED_MIGRATION = ICLOUD_APPLE_ACCOUNT_MIGRATION
+export const REQUIRED_MIGRATION = ICLOUD_ALIAS_QUOTA_MIGRATION
 export const WRANGLER_MIGRATION_NAMES = [
   '0001_initial.sql',
   '0002_domains.sql',
@@ -56,7 +51,7 @@ export const WRANGLER_MIGRATION_NAMES = [
   NAVER_MAIL_MIGRATION,
   YANDEX_MAIL_MIGRATION,
   EXTERNAL_MAIL_INDEX_MIGRATION, MESSAGE_READ_MIGRATION, NOTIFICATION_MIGRATION,
-  REQUIRED_MIGRATION,
+  ICLOUD_APPLE_ACCOUNT_MIGRATION, REQUIRED_MIGRATION,
 ] as const
 export const LEGACY_BASELINES: Record<string, number> = {
   '2026-07-29-p5-outbound-rate-limit-admin': 14,
@@ -596,5 +591,5 @@ export const RECOVERABLE_MIGRATIONS = [
   YANDEX_MAIL_RECOVERY,
   EXTERNAL_MAIL_INDEX_RECOVERY,
   MESSAGE_READ_RECOVERY, NOTIFICATION_RECOVERY,
-  ICLOUD_APPLE_ACCOUNT_RECOVERY,
+  ICLOUD_APPLE_ACCOUNT_RECOVERY, ICLOUD_ALIAS_QUOTA_RECOVERY,
 ] as const

@@ -110,4 +110,22 @@ describe('Apple Account private email client', () => {
     await Promise.all([first, second])
     expect(order).toEqual(['first-start', 'first-end', 'second-start'])
   })
+  it('reports an unrecognised listing payload instead of claiming zero aliases', async () => {
+    // aliasArray() cannot find a list in this shape. Returning [] would let the
+    // caller persist alias_total = 0 over a known-good count.
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(Response.json({ unexpected: { shape: true } }))
+    const client = new AppleAccountClient(state())
+
+    const error = await client.listAliases().catch((reason) => reason)
+
+    expect(error).toBeInstanceOf(ICloudRemoteError)
+    expect((error as ICloudRemoteError).code).toBe(APPLE_ACCOUNT_ERROR_CODES.api)
+  })
+
+  it('still reports a genuinely empty list as empty', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(Response.json({ hmeEmails: [] }))
+    const client = new AppleAccountClient(state())
+
+    await expect(client.listAliases()).resolves.toEqual([])
+  })
 })

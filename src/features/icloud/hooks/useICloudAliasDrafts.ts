@@ -1,0 +1,98 @@
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { api } from '../../../shared/api'
+import { errorMessage } from '../../../shared/api/errorMessage'
+import { newAliasDraft, type AliasDraft } from '../model/icloud-alias-batch'
+
+/**
+ * Preview drafts for the legacy cookie channel, where the suggested address is
+ * real information worth showing before committing.
+ *
+ * Every preview writes the refreshed cookie jar back on the server, so requests
+ * are chained one at a time; firing several in parallel makes that a
+ * last-writer-wins race.
+ */
+export function useICloudAliasDrafts(accountId: string, maximum: number, enabled: boolean) {
+  const [drafts, setDrafts] = useState<AliasDraft[]>(() => [newAliasDraft(crypto.randomUUID())])
+  const firstDraftId = useRef(drafts[0].id)
+  const draftsRef = useRef(drafts)
+  const versions = useRef(new Map<string, number>())
+  const inFlight = useRef(new Map<string, number>())
+  const queue = useRef<Promise<unknown>>(Promise.resolve())
+  draftsRef.current = drafts
+
+  const update = useCallback((id: string, patch: Partial<AliasDraft>) => {
+    setDrafts((items) => items.map((item) => (item.id === id ? { ...item, ...patch } : item)))
+  }, [])
+
+  const preview = useCallback((id: string) => {
+    const version = (versions.current.get(id) || 0) + 1
+    versions.current.set(id, version)
+    inFlight.current.set(id, (inFlight.current.get(id) || 0) + 1)
+    update(id, { loading: true, error: '' })
+    const run = async () => {
+      try {
+        const result = await api.previewICloudAlias(accountId)
+        if (versions.current.get(id) !== version) return
+        update(id, { email: result.email, previewId: result.previewId })
+      } catch (previewError) {
+        if (versions.current.get(id) !== version) return
+        update(id, { error: errorMessage(previewError) })
+      } finally {
+        // The version guard decides whether the *result* is still wanted; the
+        // spinner must clear regardless, or an invalidated draft would stay
+        // loading forever and lock the dialog. Counting in-flight requests keeps
+        // a superseded response from clearing a newer one's spinner.
+        const pending = (inFlight.current.get(id) || 1) - 1
+        if (pending > 0) inFlight.current.set(id, pending)
+        else {
+          inFlight.current.delete(id)
+          update(id, { loading: false })
+        }
+      }
+    }
+    queue.current = queue.current.then(run, run)
+    return queue.current
+  }, [accountId, update])
+
+  // The first preview and the invalidation that cancels it must live in one
+  // effect. Split apart, StrictMode's mount/unmount/mount would invalidate the
+  // only request that was ever issued and leave the card loading forever.
+  useEffect(() => {
+    if (!enabled) return undefined
+    const active = versions.current
+    const timer = window.setTimeout(() => void preview(firstDraftId.current), 0)
+    return () => {
+      window.clearTimeout(timer)
+      for (const [id, version] of active) active.set(id, version + 1)
+    }
+  }, [enabled, preview])
+
+  // Side effects must stay out of the state updater: React may run an updater
+  // more than once, and a preview started in there would target a draft that is
+  // not in state yet.
+  const add = useCallback((count = 1) => {
+    const room = Math.max(0, Math.min(count, maximum - draftsRef.current.length))
+    if (!room) return
+    const created = Array.from({ length: room }, () => newAliasDraft(crypto.randomUUID()))
+    setDrafts((items) => {
+      // draftsRef only refreshes on render, so two clicks inside one frame would
+      // both see the pre-click length. Clamping again against the live state is
+      // what actually enforces the cap; a draft dropped here simply never
+      // matches its own preview update.
+      const accepted = Math.max(0, Math.min(created.length, maximum - items.length))
+      return accepted ? [...items, ...created.slice(0, accepted)] : items
+    })
+    for (const draft of created) void preview(draft.id)
+  }, [maximum, preview])
+
+  const remove = useCallback((id: string) => {
+    versions.current.set(id, (versions.current.get(id) || 0) + 1)
+    setDrafts((items) => (items.length > 1 ? items.filter((item) => item.id !== id) : items))
+  }, [])
+
+  const setLabel = useCallback((id: string, label: string) => {
+    update(id, { label: label.slice(0, 80) })
+  }, [update])
+
+  return { drafts, preview, add, remove, setLabel, busy: drafts.some((draft) => draft.loading) }
+}

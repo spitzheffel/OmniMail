@@ -35,11 +35,43 @@ describe('iCloud API client Apple Account contract', () => {
       return {} as T
     }, JSON.stringify)
 
-    await api.createICloudAlias('account-1', 'Shopping')
+    await api.createICloudAlias({ accountId: 'account-1', label: 'Shopping', channel: 'apple_account' })
 
     expect(calls[0]).toEqual({
       path: '/api/icloud/aliases',
-      body: { accountId: 'account-1', label: 'Shopping' },
+      body: { accountId: 'account-1', label: 'Shopping', channel: 'apple_account' },
     })
+  })
+
+  it('sends the reserved preview address on the legacy cookie channel', async () => {
+    const calls: Array<{ path: string; body: Record<string, unknown> }> = []
+    const api = createICloudApi(async <T>(path: string, init: RequestInit = {}) => {
+      calls.push({ path, body: JSON.parse(String(init.body)) as Record<string, unknown> })
+      return {} as T
+    }, JSON.stringify)
+
+    await api.createICloudAlias({
+      accountId: 'account-1', label: '', channel: 'icloud_web',
+      email: 'suggested@icloud.com', previewId: '00000000-0000-4000-8000-000000000001',
+    })
+
+    expect(calls[0].body).toEqual({
+      accountId: 'account-1', label: '', channel: 'icloud_web',
+      email: 'suggested@icloud.com', previewId: '00000000-0000-4000-8000-000000000001',
+    })
+  })
+
+  it('reads the hourly quota with an escaped account id and a caller signal', async () => {
+    const calls: Array<{ path: string; signal?: AbortSignal | null }> = []
+    const api = createICloudApi(async <T>(path: string, init: RequestInit = {}) => {
+      calls.push({ path, signal: init.signal })
+      return {} as T
+    }, JSON.stringify)
+    const controller = new AbortController()
+
+    await api.iCloudAliasQuota('account/1', controller.signal)
+
+    expect(calls[0].path).toBe('/api/icloud/aliases/quota?accountId=account%2F1')
+    expect(calls[0].signal).toBe(controller.signal)
   })
 })

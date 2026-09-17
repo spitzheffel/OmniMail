@@ -42,6 +42,20 @@ export interface ICloudAlias {
   createdAt?: string
 }
 
+/** `apple_account` is the current management API; `icloud_web` the legacy cookie path. */
+export type ICloudAliasChannel = 'apple_account' | 'icloud_web'
+
+export interface ICloudAliasQuotaChannel {
+  channel: ICloudAliasChannel
+  /** Whether this account has the credentials the channel needs. */
+  available: boolean
+  limit: number
+  used: number
+  remaining: number
+  /** ISO timestamp at which the current hour rolls over. */
+  resetsAt: string
+}
+
 export interface ICloudMessage {
   id: string
   from: string

@@ -1,175 +1,5 @@
-import { expect, type Page, type Route, test } from '@playwright/test'
-
-function json(route: Route, body: unknown) {
-  return route.fulfill({ contentType: 'application/json', body: JSON.stringify(body) })
-}
-
-async function mockICloud(page: Page, options: {
-  failCreateAt?: number
-  hasAppPassword?: boolean
-  rejectAccountCreate?: boolean
-} = {}) {
-  const hasAppPassword = options.hasAppPassword ?? true
-  const aliases = [{
-    email: 'shop@icloud.com', anonymousId: 'alias-1', label: 'Shopping', active: true,
-  }]
-  const inboxAliases: string[] = []
-  const inboxQueries: string[] = []
-  const messageReads: string[] = []
-  const createdLabels: string[] = []
-  const createdEmails: string[] = []
-  const createdPreviewIds: string[] = []
-  const previewedEmails: string[] = []
-  const accountNames: string[] = []
-  const accountCreates: Array<{
-    name: string
-    host: string
-    cookies: string
-    icloudEmail?: string
-    appPassword?: string
-  }> = []
-  const cookieUpdates: string[] = []
-  const passwordUpdates: Array<{ icloudEmail: string; appPassword: string }> = []
-  const deletedAccountIds: string[] = []
-  let accountDeleted = false
-  let createAttempts = 0
-  let accountName = 'Personal'
-  const previewCandidates = [
-    'preview-one@icloud.com', 'github-1@icloud.com', 'github-2@icloud.com',
-    'github-3@icloud.com', 'github-4@icloud.com', 'github-5@icloud.com',
-  ]
-  const previewIds = previewCandidates.map((_, index) => (
-    `00000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`
-  ))
-  await page.addInitScript(() => {
-    localStorage.setItem('omnimail.deployment-guide.v1', 'seen')
-    localStorage.setItem('omnimail-locale', 'zh-CN')
-    Object.defineProperty(navigator, 'clipboard', {
-      configurable: true,
-      value: { writeText: async () => undefined },
-    })
-  })
-  await page.route('**://*/api/**', async (route) => {
-    const request = route.request()
-    const url = new URL(request.url())
-    const path = url.pathname
-    if (path === '/api/config') return json(route, {
-      appName: 'OmniMail', setupComplete: true, replyEnabled: false,
-      iCloudEnabled: true, iCloudWorkspaceEnabled: true, linuxDoMailWorkspaceEnabled: true,
-      registrationEnabled: false, registrationAvailable: false,
-      registrationMethod: 'password', linuxDoLoginEnabled: false,
-      registrationDomainPolicy: { mode: 'blocklist', domains: [] },
-      registrationProtectionReady: false, turnstileSiteKey: '', mailRefreshInterval: 0,
-      remoteImagesEnabled: true, unassignedMailEnabled: false, superAdminEmail: '',
-      setupRequirements: { databaseReady: true, storageReady: true, queueReady: true,
-        superAdminReady: true, setupTokenReady: false },
-    })
-    if (path === '/api/session') return json(route, { user: {
-      id: 'user-1', email: 'user@example.com', displayName: 'User', role: 'user',
-      mailboxLimit: 1, storageQuotaBytes: 1024, storageUsedBytes: 0,
-      canCreateMailboxes: false, canReply: false, canTranslate: false,
-      temporaryExpiresAt: null,
-    } })
-    if (path === '/api/mailboxes') return json(route, { mailboxes: [] })
-    if (path === '/api/domains') return json(route, { domains: [] })
-    if (path === '/api/remote-images') return route.fulfill({
-      contentType: 'image/svg+xml',
-      body: '<svg xmlns="http://www.w3.org/2000/svg" width="120" height="32"><rect width="120" height="32" rx="6" fill="#24292f"/><text x="60" y="21" text-anchor="middle" fill="white">GitHub</text></svg>',
-    })
-    const account = {
-      id: 'icloud-1', name: accountName, realEmail: 'owner@example.com',
-      icloudEmail: 'owner@icloud.com', host: 'icloud.com', status: 'active',
-      aliasTotal: 1, aliasActive: 1, lastValidated: '2026-08-13T00:00:00.000Z',
-      lastError: '', createdAt: '2026-08-13T00:00:00.000Z',
-      hasCookies: true, hasAppPassword,
-    }
-    if (path === '/api/icloud/accounts' && request.method() === 'POST') {
-      accountCreates.push(request.postDataJSON())
-      if (options.rejectAccountCreate) return route.fulfill({
-        status: 422,
-        contentType: 'application/json',
-        body: JSON.stringify({
-          error: 'iCloud Cookie 已失效，或账号未开通 iCloud+、没有 Hide My Email 权限。',
-        }),
-      })
-      return json(route, { account })
-    }
-    if (path === '/api/icloud/accounts') return json(route, { accounts: accountDeleted ? [] : [account] })
-    if (path === '/api/icloud/accounts/icloud-1' && request.method() === 'DELETE') {
-      accountDeleted = true
-      deletedAccountIds.push('icloud-1')
-      return json(route, { ok: true })
-    }
-    if (path === '/api/icloud/accounts/icloud-1' && request.method() === 'PATCH') {
-      const input = request.postDataJSON() as { name: string }
-      accountName = input.name
-      accountNames.push(input.name)
-      return json(route, { ok: true, name: input.name })
-    }
-    if (path === '/api/icloud/accounts/icloud-1/cookies' && request.method() === 'PUT') {
-      const input = request.postDataJSON() as { cookies: string }
-      cookieUpdates.push(input.cookies)
-      return json(route, { account })
-    }
-    if (path === '/api/icloud/accounts/icloud-1/app-password' && request.method() === 'PUT') {
-      const input = request.postDataJSON() as { icloudEmail: string; appPassword: string }
-      passwordUpdates.push(input)
-      return json(route, { ok: true, icloudEmail: input.icloudEmail })
-    }
-    if (path === '/api/icloud/aliases/preview' && request.method() === 'POST') {
-      const index = Math.min(previewedEmails.length, previewCandidates.length - 1)
-      const email = previewCandidates[index]
-      previewedEmails.push(email)
-      return json(route, { email, previewId: previewIds[index] })
-    }
-    if (path === '/api/icloud/aliases' && request.method() === 'POST') {
-      createAttempts += 1
-      if (createAttempts === options.failCreateAt) return route.fulfill({
-        status: 502,
-        contentType: 'application/json',
-        body: JSON.stringify({ error: 'iCloud 暂时无法创建这个地址。' }),
-      })
-      const input = request.postDataJSON() as { email: string; label: string; previewId: string }
-      createdLabels.push(input.label)
-      createdEmails.push(input.email)
-      createdPreviewIds.push(input.previewId)
-      const alias = {
-        email: input.email, anonymousId: `alias-${aliases.length + 1}`,
-        label: input.label || 'OmniMail 2026-08-18 10:00', active: true,
-      }
-      aliases.push(alias)
-      return json(route, { alias })
-    }
-    if (path === '/api/icloud/aliases') return json(route, { aliases })
-    if (path === '/api/icloud/inbox') {
-      const alias = url.searchParams.get('alias') || ''
-      const query = url.searchParams.get('q') || ''
-      inboxAliases.push(alias)
-      inboxQueries.push(query)
-      const messages = query === 'missing' ? [] : [{
-      id: '42', from: 'GitHub <noreply_at_github_com_22h56q5td86002_47bfb5aa@icloud.com>', to: alias || 'shop@icloud.com',
-      subject: 'Your receipt', date: '2026-08-13T00:00:00.000Z',
-      preview: 'Thanks for your order.', body: 'Thanks for your order.', html: '',
-      }]
-      return json(route, { method: hasAppPassword ? 'imap' : 'web', messages })
-    }
-    if (path === '/api/icloud/inbox/42') {
-      messageReads.push('42')
-      return json(route, { message: {
-      id: '42', from: 'GitHub <noreply_at_github_com_22h56q5td86002_47bfb5aa@icloud.com>', to: 'shop@icloud.com',
-      subject: 'Your receipt', date: '2026-08-13T00:00:00.000Z',
-      preview: 'Thanks for your order.', body: 'Full receipt body.',
-      html: `<html><body><img src="https://github.com/logo.png" alt="GitHub"><h1>Full receipt body.</h1><p><a href="https://github.com/account_verifications">Open receipt</a></p>${'<p>Receipt details</p>'.repeat(80)}<script>document.body.textContent="unsafe"</script></body></html>`,
-      } })
-    }
-    return route.abort()
-  })
-  return {
-    accountCreates, accountNames, cookieUpdates, createdEmails, createdLabels, createdPreviewIds,
-    deletedAccountIds,
-    inboxAliases, inboxQueries, messageReads, passwordUpdates, previewedEmails,
-  }
-}
+import { expect, test } from '@playwright/test'
+import { mockICloud } from './icloud-fixtures'
 
 test('iCloud workspace is available to a regular user and reads a message', async ({ page }) => {
   await page.setViewportSize({ width: 2048, height: 1150 })
@@ -229,12 +59,12 @@ test('iCloud workspace is available to a regular user and reads a message', asyn
   const nameInput = settingsDialog.getByRole('textbox', { name: '备注名称' })
   await expect(nameInput).toBeFocused()
   await expect(nameInput).toHaveValue('Personal')
-  const settingsHeight = await settingsDialog.evaluate((element) => element.offsetHeight)
+  const settingsHeight = await settingsDialog.evaluate((element: HTMLElement) => element.offsetHeight)
   await nameInput.fill('Work iCloud')
   await settingsDialog.getByRole('button', { name: '保存备注' }).click()
   await expect.poll(() => state.accountNames).toEqual(['Work iCloud'])
   await expect(page.locator('.toast')).toHaveText('备注名称已保存')
-  expect(Math.abs(await settingsDialog.evaluate((element) => element.offsetHeight)
+  expect(Math.abs(await settingsDialog.evaluate((element: HTMLElement) => element.offsetHeight)
     - settingsHeight)).toBeLessThanOrEqual(1)
   await expect(settingsDialog.getByRole('status')).toHaveCount(0)
   await expect(settingsDialog).toHaveAccessibleName('设置 Work iCloud')
@@ -421,16 +251,16 @@ test('creates five labeled Hide My Email addresses in one batch', async ({ page 
   await expect(dialog.getByText('github-1@icloud.com', { exact: true })).toBeVisible()
   const firstDraftWidth = await dialog.locator('.icloud-alias-preview').first()
     .evaluate((element) => element.getBoundingClientRect().width)
+  // One click fills the remaining budget instead of four separate clicks.
+  await dialog.getByRole('button', { name: '加到上限' }).click()
   for (let index = 2; index <= 5; index += 1) {
-    await dialog.getByRole('button', { name: /增加邮箱/ }).click()
     await expect(dialog.getByText(`github-${index}@icloud.com`, { exact: true })).toBeVisible()
-    if (index === 2) {
-      expect(await dialog.locator('.icloud-alias-preview').first()
-        .evaluate((element) => element.getBoundingClientRect().width)).toBeCloseTo(firstDraftWidth, 1)
-    }
   }
-  await expect(dialog.getByText('5/5', { exact: true })).toBeVisible()
+  expect(await dialog.locator('.icloud-alias-preview').first()
+    .evaluate((element) => element.getBoundingClientRect().width)).toBeCloseTo(firstDraftWidth, 1)
+  await expect(dialog.getByText('创建项目 5/5')).toBeVisible()
   await expect(dialog.getByRole('button', { name: '增加邮箱' })).toBeDisabled()
+  await expect(dialog.getByText('旧接口本小时剩余 5/5')).toBeVisible()
   expect(state.previewedEmails).toEqual([
     'preview-one@icloud.com', 'github-1@icloud.com', 'github-2@icloud.com',
     'github-3@icloud.com', 'github-4@icloud.com', 'github-5@icloud.com',
@@ -454,11 +284,12 @@ test('creates five labeled Hide My Email addresses in one batch', async ({ page 
     await labelInputs.nth(index).fill(`GITHUB${index + 1}`)
   }
   await dialog.getByRole('button', { name: '创建 5 个' }).click()
-  await expect(dialog.getByRole('progressbar', { name: '创建进度' })).toBeVisible()
   await expect(dialog.getByText(/创建进度 \d\/5/)).toBeVisible()
-  await expect(dialog.locator('.icloud-alias-preview.is-success')).toHaveCount(1)
-  await expect(dialog.getByText('创建成功')).toBeVisible()
-  await expect(dialog.locator('.icloud-alias-preview')).toHaveCount(4)
+  // Rows stay put and fill in with the address that was actually created.
+  await expect(dialog.locator('.icloud-alias-preview.is-success')).toHaveCount(5)
+  await expect(dialog.locator('.icloud-alias-preview')).toHaveCount(5)
+  await expect(dialog.getByText('成功 5 个，失败 0 个。')).toBeVisible()
+  await expect(dialog.getByRole('button', { name: '继续创建' })).toBeEnabled()
 
   await expect(page.locator('.icloud-list-context'))
     .toContainText('github-5@icloud.com')
@@ -477,30 +308,68 @@ test('creates five labeled Hide My Email addresses in one batch', async ({ page 
   await expect.poll(() => state.inboxAliases.at(-1)).toBe('github-5@icloud.com')
 })
 
-test('keeps uncreated aliases available after a partial batch failure', async ({ page }) => {
+test('finishes the rest of the batch after one alias fails', async ({ page }) => {
   const state = await mockICloud(page, { failCreateAt: 3 })
   await page.goto('/icloud')
 
   await page.getByRole('button', { name: '创建隐藏邮箱' }).click()
   const dialog = page.getByRole('dialog', { name: '创建隐藏邮箱' })
   await expect(dialog.getByText('preview-one@icloud.com', { exact: true })).toBeVisible()
-  await dialog.getByRole('button', { name: /增加邮箱/ }).click()
-  await expect(dialog.getByText('github-1@icloud.com', { exact: true })).toBeVisible()
-  await dialog.getByRole('button', { name: /增加邮箱/ }).click()
-  await expect(dialog.getByText('github-2@icloud.com', { exact: true })).toBeVisible()
+  for (let index = 1; index <= 3; index += 1) {
+    await dialog.getByRole('button', { name: '增加邮箱' }).click()
+    await expect(dialog.getByText(`github-${index}@icloud.com`, { exact: true })).toBeVisible()
+  }
   const labels = dialog.getByRole('textbox', { name: '用途标签（可选）' })
-  await labels.nth(0).fill('ONE')
-  await labels.nth(1).fill('TWO')
-  await labels.nth(2).fill('THREE')
-  await dialog.getByRole('button', { name: '创建 3 个' }).click()
+  for (const [index, label] of ['ONE', 'TWO', 'THREE', 'FOUR'].entries()) {
+    await labels.nth(index).fill(label)
+  }
+  await dialog.getByRole('button', { name: '创建 4 个' }).click()
 
   await expect(dialog).toBeVisible()
-  await expect(dialog.locator('p.inline-error')).toContainText('已创建 2 个')
-  await expect(dialog.getByRole('textbox', { name: '用途标签（可选）' })).toHaveValue('THREE')
-  await expect(dialog.getByText('github-2@icloud.com', { exact: true })).toBeVisible()
-  await expect(dialog.locator('.icloud-alias-preview')).toHaveClass(/is-error/)
-  await expect(dialog.getByRole('button', { name: '创建 1 个' })).toBeEnabled()
-  expect(state.createdLabels).toEqual(['ONE', 'TWO'])
+  // The third item fails, and the fourth still runs instead of being dropped.
+  await expect(dialog.getByText('成功 3 个，失败 1 个。')).toBeVisible()
+  await expect(dialog.locator('.icloud-alias-preview.is-success')).toHaveCount(3)
+  await expect(dialog.locator('.icloud-alias-preview.is-error')).toHaveCount(1)
+  expect(state.createdLabels).toEqual(['ONE', 'TWO', 'FOUR'])
+})
+
+test('creates a numbered batch through the Apple Account channel', async ({ page }) => {
+  const state = await mockICloud(page, { hasAppleAccount: true, quota: { apple: 20, web: null } })
+  await page.goto('/icloud')
+
+  await page.getByRole('button', { name: '创建隐藏邮箱' }).click()
+  const dialog = page.getByRole('dialog', { name: '创建隐藏邮箱' })
+  // No preview round-trips at all on this channel.
+  await expect(dialog.locator('.icloud-alias-preview')).toHaveCount(0)
+  await expect(dialog.getByText('新接口本小时剩余 20/20')).toBeVisible()
+  const quantity = dialog.getByRole('spinbutton', { name: '创建数量' })
+  await quantity.fill('3')
+  await dialog.getByRole('textbox', { name: '基础标签（可选）' }).fill('GITHUB')
+  await dialog.getByRole('button', { name: '创建 3 个' }).click()
+
+  await expect(dialog.getByText('成功 3 个，失败 0 个。')).toBeVisible()
+  expect(state.createdLabels).toEqual(['GITHUB-01', 'GITHUB-02', 'GITHUB-03'])
+  expect(state.createdChannels).toEqual(['apple_account', 'apple_account', 'apple_account'])
+  expect(state.previewedEmails).toEqual([])
+})
+
+test('spills to the cookie channel once the Apple budget runs out', async ({ page }) => {
+  const state = await mockICloud(page, { hasAppleAccount: true, quota: { apple: 2, web: 5 } })
+  await page.goto('/icloud')
+
+  await page.getByRole('button', { name: '创建隐藏邮箱' }).click()
+  const dialog = page.getByRole('dialog', { name: '创建隐藏邮箱' })
+  await expect(dialog.getByRole('button', { name: '自动', exact: true }))
+    .toHaveAttribute('aria-pressed', 'true')
+  await dialog.getByRole('spinbutton', { name: '创建数量' }).fill('4')
+  await dialog.getByRole('button', { name: '创建 4 个' }).click()
+
+  await expect(dialog.getByText('成功 4 个，失败 0 个。')).toBeVisible()
+  // Planned up front from the quota, so no Apple request is wasted.
+  expect(state.createdChannels).toEqual([
+    'apple_account', 'apple_account', 'icloud_web', 'icloud_web',
+  ])
+  await expect(dialog.getByText('新接口 2 个 · 旧接口 2 个')).toBeVisible()
 })
 
 test('allows iCloud to create an automatic purpose label', async ({ page }) => {

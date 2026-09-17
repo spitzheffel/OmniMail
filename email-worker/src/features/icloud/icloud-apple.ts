@@ -18,6 +18,12 @@ export class ICloudRemoteError extends Error {
     message: string,
     readonly definitive = false,
     readonly code = '',
+    /**
+     * Upstream wording carried beside the message instead of inside it. t()
+     * keys on the exact source string, so interpolating a dynamic reason into
+     * `message` would silently lose its translation.
+     */
+    readonly detail = '',
   ) {
     super(message)
   }
@@ -28,7 +34,42 @@ export const APPLE_ACCOUNT_ERROR_CODES = {
   limit: 'apple_account_hme_limit',
   api: 'apple_account_api_failed',
   missing: 'apple_account_session_missing',
+  // Raised by our own local cooldown, never by Apple. It must stay distinct
+  // from `limit` so the create handler cannot mistake its own rejection for a
+  // fresh upstream limit and extend the cooldown again.
+  cooldown: 'apple_account_create_cooldown',
 } as const
+
+export const ICLOUD_WEB_ERROR_CODES = {
+  limit: 'icloud_web_hme_limit',
+} as const
+
+/**
+ * The legacy Hide My Email endpoints answer 200 with `success: false` and phrase
+ * the hourly cap in prose, so the wording is the only signal. Matchers ported
+ * from the reference panel's isICloudHMELimitMessage.
+ */
+function iCloudHmeLimitReason(reason: string): boolean {
+  const text = reason.toLowerCase()
+  return text.includes('reached the limit of addresses')
+    || (text.includes('limit') && text.includes('try again later'))
+    || reason.includes('创建上限')
+}
+
+function iCloudHmeFailure(data: Record<string, unknown>, fallback: string): ICloudRemoteError {
+  const reason = nonEmpty(data.error, data.reason, data.errorMessage, data.message).slice(0, 300)
+  if (iCloudHmeLimitReason(reason)) {
+    return new ICloudRemoteError(
+      429,
+      'iCloud 已达到当前隐藏邮箱创建上限，请稍后再试。',
+      true,
+      ICLOUD_WEB_ERROR_CODES.limit,
+    )
+  }
+  // Apple answered and refused, so nothing was reserved: `definitive` lets the
+  // caller give the hourly slot back.
+  return new ICloudRemoteError(502, fallback, true, '', reason)
+}
 
 
 interface ValidateResponse {
@@ -301,7 +342,7 @@ export class ICloudClient {
       `${this.serviceUrl}/v1/hme/generate`,
       { langCode: 'en-us' },
     )
-    if (!generated.success) throw new ICloudRemoteError(502, 'iCloud 无法生成隐藏邮箱。')
+    if (!generated.success) throw iCloudHmeFailure(generated, 'iCloud 无法生成隐藏邮箱。')
     const email = generatedAliasAddress(generated.result)
     if (!email) throw new ICloudRemoteError(502, 'iCloud 响应中没有隐藏邮箱地址。')
     return email
@@ -322,7 +363,7 @@ export class ICloudClient {
       `${this.serviceUrl}/v1/hme/reserve`,
       { hme: normalizedEmail, label: finalLabel, note: 'Created by OmniMail' },
     )
-    if (!reserved.success) throw new ICloudRemoteError(502, 'iCloud 无法保留隐藏邮箱。')
+    if (!reserved.success) throw iCloudHmeFailure(reserved, 'iCloud 无法保留隐藏邮箱。')
     return {
       email: generatedAliasAddress(reserved.result) || normalizedEmail,
       label: finalLabel,

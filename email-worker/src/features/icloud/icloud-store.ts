@@ -223,6 +223,34 @@ export class ICloudAccountStore {
     return results.map(publicICloudAccountRow)
   }
 
+  /**
+   * Which credentials an account holds, derived in SQL. Cheaper and safer than
+   * get() for callers that only need availability, since no ciphertext is read
+   * and nothing is decrypted.
+   */
+  async credentialFlags(id: string): Promise<{
+    hasCookies: boolean
+    hasAppPassword: boolean
+    hasAppleAccount: boolean
+  }> {
+    const row = await this.env.DB.prepare(
+      `SELECT CASE WHEN cookies_cipher <> '' THEN 1 ELSE 0 END AS has_cookies,
+              CASE WHEN app_password_cipher <> '' THEN 1 ELSE 0 END AS has_app_password,
+              CASE WHEN apple_account_state_cipher <> '' THEN 1 ELSE 0 END AS has_apple_account
+       FROM icloud_accounts WHERE id = ? AND user_id = ?`,
+    ).bind(id, this.userId).first<{
+      has_cookies: number
+      has_app_password: number
+      has_apple_account: number
+    }>()
+    if (!row) throw new ICloudStoreError(404, 'iCloud 账号不存在。')
+    return {
+      hasCookies: Boolean(row.has_cookies),
+      hasAppPassword: Boolean(row.has_app_password),
+      hasAppleAccount: Boolean(row.has_apple_account),
+    }
+  }
+
   async get(id: string): Promise<ICloudAccount> {
     const row = await this.env.DB.prepare(
       'SELECT * FROM icloud_accounts WHERE id = ? AND user_id = ?',
@@ -354,12 +382,15 @@ export class ICloudAccountStore {
     const result = await this.env.DB.prepare(
       `UPDATE icloud_accounts SET apple_account_state_cipher = ?,
         apple_account_expires_at = ?, apple_account_status = ?, apple_account_error = ?,
+        alias_total = ?, alias_active = ?,
         updated_at = ? WHERE id = ? AND user_id = ?`,
     ).bind(
       cipher,
       account.appleAccountExpiresAt || '',
       account.appleAccountStatus || 'none',
       account.appleAccountError || '',
+      Math.max(0, account.aliasTotal || 0),
+      Math.max(0, account.aliasActive || 0),
       new Date().toISOString(),
       account.id,
       this.userId,

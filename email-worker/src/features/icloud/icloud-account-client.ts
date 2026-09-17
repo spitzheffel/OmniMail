@@ -127,16 +127,21 @@ export interface AppleAccountAlias {
   createdAt: string
 }
 
-function aliasArray(value: unknown): Record<string, unknown>[] {
+/**
+ * Locate the alias array in Apple's envelope. `found` distinguishes a genuinely
+ * empty list from a payload shape we do not understand — callers must not treat
+ * the latter as "this account has zero aliases".
+ */
+function aliasArray(value: unknown): { rows: Record<string, unknown>[]; found: boolean } {
   if (Array.isArray(value) && value.every((item) => item && typeof item === 'object' && !Array.isArray(item))) {
-    return value as Record<string, unknown>[]
+    return { rows: value as Record<string, unknown>[], found: true }
   }
-  if (!value || typeof value !== 'object') return []
+  if (!value || typeof value !== 'object') return { rows: [], found: false }
   for (const child of Object.values(value)) {
-    const found = aliasArray(child)
-    if (found.length) return found
+    const nested = aliasArray(child)
+    if (nested.found) return nested
   }
-  return []
+  return { rows: [], found: false }
 }
 
 function aliasFromValue(value: Record<string, unknown>): AppleAccountAlias | null {
@@ -320,7 +325,18 @@ export class AppleAccountClient {
   async listAliases(): Promise<AppleAccountAlias[]> {
     if (!appleAccountStateUsable(this.state)) await this.refresh()
     const data = await this.request<unknown>('GET', '/account/manage/email/private', undefined, true)
-    return aliasArray(data).map(aliasFromValue).filter((alias): alias is AppleAccountAlias => Boolean(alias))
+    const { rows, found } = aliasArray(data)
+    if (!found) {
+      // Reported as an API failure so callers fall back to their "listing
+      // unavailable" path instead of persisting a bogus count of zero.
+      throw new ICloudRemoteError(
+        502,
+        'Apple Account 未返回可识别的隐私邮箱列表。',
+        true,
+        APPLE_ACCOUNT_ERROR_CODES.api,
+      )
+    }
+    return rows.map(aliasFromValue).filter((alias): alias is AppleAccountAlias => Boolean(alias))
   }
 
   isUsable(): boolean {
