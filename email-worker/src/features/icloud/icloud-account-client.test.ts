@@ -172,6 +172,21 @@ describe('Apple Account private email client', () => {
     ])
   })
 
+  it('reports zero aliases when hmeEmails holds nothing it can read', async () => {
+    // The name settles it. Falling through to the positional search because no
+    // entry was a readable object is how forwardToEmails wins — reporting an
+    // empty list is wrong, but publishing the user's own address is worse.
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(Response.json({
+      result: {
+        forwardToEmails: [{ emailAddress: 'real@me.com', id: 'f1' }],
+        hmeEmails: ['shop@icloud.com'],
+      },
+    }))
+    const client = new AppleAccountClient(state())
+
+    await expect(client.listAliases()).resolves.toEqual([])
+  })
+
   it('skips an empty sibling array to reach the alias list', async () => {
     // [].every() is vacuously true; an empty list ahead of hmeEmails in key
     // order must not be mistaken for "this account has zero aliases".

@@ -56,12 +56,10 @@ export function ICloudAliasBatchForm({ account, close, onCreated }: {
   const maximum = Math.max(0, remainingFor(channels, effective))
   const running = step === 'running'
 
-  // A saturated window must not arm the preview: the card it would fill cannot
-  // be submitted, so the request can only come back as an error.
   const drafts = useICloudAliasDrafts(
     account.id,
-    Math.max(1, maximum),
-    useCards && maximum > 0,
+    maximum,
+    useCards,
     () => applyRemaining('icloud_web', 0),
   )
   const count = useCards ? drafts.drafts.length : Math.min(quantity, Math.max(1, maximum))
@@ -156,6 +154,7 @@ export function ICloudAliasBatchForm({ account, close, onCreated }: {
 
       {step === 'form' ? useCards
         ? <ICloudAliasDraftCards drafts={drafts.drafts} disabled={running}
+          canPreview={maximum > 0}
           onPreview={drafts.preview} onRemove={drafts.remove} onLabel={drafts.setLabel} />
         : <ICloudAliasQuantityFields quantity={count} maximum={maximum} baseLabel={baseLabel}
           disabled={running} onQuantity={setQuantity} onBaseLabel={setBaseLabel} />

@@ -12,9 +12,13 @@ function Spinner() {
  * Legacy cookie channel. Unlike the Apple path, the address is known before
  * submitting, so each item stays a card the user can reroll or drop.
  */
-export function ICloudAliasDraftCards({ drafts, disabled, onPreview, onRemove, onLabel }: {
+export function ICloudAliasDraftCards({
+  drafts, disabled, canPreview, onPreview, onRemove, onLabel,
+}: {
   drafts: AliasDraft[]
   disabled: boolean
+  /** Separate from `disabled`: a spent hour still leaves the labels editable. */
+  canPreview: boolean
   onPreview: (id: string) => void
   onRemove: (id: string) => void
   onLabel: (id: string, label: string) => void
@@ -33,7 +37,7 @@ export function ICloudAliasDraftCards({ drafts, disabled, onPreview, onRemove, o
               <span id={`icloud-alias-draft-${draft.id}`}>{t('隐藏邮箱 {index}', { index: index + 1 })}</span>
               <span className="icloud-alias-preview-actions">
                 <button className="icloud-alias-draft-action" type="button"
-                  disabled={busy || disabled}
+                  disabled={busy || disabled || !canPreview}
                   aria-label={t('为隐藏邮箱 {index} 换一个地址', { index: index + 1 })}
                   data-tooltip={t('换一个')}
                   onClick={() => onPreview(draft.id)}>

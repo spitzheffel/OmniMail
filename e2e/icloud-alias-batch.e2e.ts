@@ -35,3 +35,22 @@ test('switching channels mid-preview does not strand the draft cards', async ({ 
   await expect(dialog.getByText(/成功 \d+ 个，失败 0 个。/)).toBeVisible()
   expect(state.createdChannels.every((channel) => channel === 'icloud_web')).toBe(true)
 })
+
+test('a spent hour keeps the drafted address and disables the reroll', async ({ page }) => {
+  // Two ways this used to go wrong: the quota response landing after the first
+  // preview invalidated it and left a blank card, and the reroll button stayed
+  // clickable so the obvious recovery was a guaranteed 429.
+  const state = await mockICloud(page, { quota: { apple: null, web: 0 } })
+  await page.goto('/icloud')
+
+  await page.getByRole('button', { name: '创建隐藏邮箱' }).click()
+  const dialog = page.getByRole('dialog', { name: '创建隐藏邮箱' })
+  await expect(dialog.getByText('本小时额度已用完')).toBeVisible()
+
+  await expect(dialog.getByText('preview-one@icloud.com', { exact: true })).toBeVisible()
+  await expect(dialog.getByRole('button', { name: '为隐藏邮箱 1 换一个地址' })).toBeDisabled()
+  await expect(dialog.getByRole('button', { name: /创建 \d+ 个/ })).toBeDisabled()
+  await expect(dialog.getByRole('button', { name: '增加邮箱' })).toBeDisabled()
+  // The mount preview had already been sent; nothing may follow it.
+  expect(state.previewedEmails).toEqual(['preview-one@icloud.com'])
+})

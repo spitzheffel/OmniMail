@@ -24,8 +24,12 @@ export function useICloudAliasDrafts(
   // that would re-run the mount effect, which invalidates the request in flight.
   const exhausted = useRef(onExhausted)
   exhausted.current = onExhausted
-  const enabledRef = useRef(enabled)
-  enabledRef.current = enabled
+  // `enabled` must stay a pure channel switch. Folding the budget into it makes
+  // a quota response that lands after the first preview re-run the effect, and
+  // its cleanup invalidates that request — leaving a blank card for a round-trip
+  // that was already spent. The reseed below reads the budget from here instead.
+  const budget = useRef(maximum)
+  budget.current = maximum
   const versions = useRef(new Map<string, number>())
   const inFlight = useRef(new Map<string, number>())
   const queue = useRef<Promise<unknown>>(Promise.resolve())
@@ -132,8 +136,8 @@ export function useICloudAliasDrafts(
     setDrafts([fresh])
     // After a fully successful batch the window is saturated and submit is
     // disabled, so a preview here could only produce a failed round-trip and an
-    // error card. The mount effect fires one as soon as the budget returns.
-    if (enabledRef.current) void preview(fresh.id)
+    // error card.
+    if (budget.current > 0) void preview(fresh.id)
   }, [preview])
 
   return { drafts, preview, add, remove, prune, setLabel, busy: drafts.some((draft) => draft.loading) }

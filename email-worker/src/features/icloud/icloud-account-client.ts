@@ -138,15 +138,16 @@ function objectRows(value: unknown): Record<string, unknown>[] | undefined {
 }
 
 /**
- * Apple's own key, at any depth. Deliberately more tolerant than objectRows:
- * the key names the list, so a stray null or a plain string entry must not
- * demote us to the positional search, which would then pick whichever array
- * comes first in key order — typically forwardToEmails.
+ * Apple's own key, at any depth. The key names the list, so finding it settles
+ * the question: whatever it holds is the answer, even if that answer is "no
+ * rows I can read". Demanding readable rows here would hand a ragged or empty
+ * hmeEmails back to the positional search, which then picks whichever array
+ * comes first in key order — typically forwardToEmails, the user's own address.
  */
 function namedRows(value: unknown): Record<string, unknown>[] | undefined {
   if (!isPlainObject(value)) return undefined
   const own = value.hmeEmails
-  if (Array.isArray(own) && (!own.length || own.some(isPlainObject))) return own.filter(isPlainObject)
+  if (Array.isArray(own)) return own.filter(isPlainObject)
   for (const child of Object.values(value)) {
     const nested = namedRows(child)
     if (nested) return nested
