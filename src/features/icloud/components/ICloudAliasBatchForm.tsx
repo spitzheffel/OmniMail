@@ -6,6 +6,7 @@ import '../styles/icloud-alias-batch.css'
 import { useICloudAliasDrafts } from '../hooks/useICloudAliasDrafts'
 import { useICloudAliasQuota } from '../hooks/useICloudAliasQuota'
 import {
+  aliasChannelBlockedMessage,
   availableChannels,
   batchSummary,
   buildAliasBatch,
@@ -126,8 +127,8 @@ export function ICloudAliasBatchForm({ account, close, onCreated }: {
     ? t('创建进度 {completed}/{total}', progress)
     : !hasUsableAliasChannel(account)
       // Not a budget problem: waiting for the window to roll over changes
-      // nothing, the session itself has to be imported again.
-      ? t('Apple Account 登录态已过期，请重新导入。')
+      // nothing, the credentials themselves have to be fixed.
+      ? aliasChannelBlockedMessage(account)
       : maximum < 1
         ? t('本小时额度已用完')
         : t('创建项目 {count}/{max}', { count, max: maximum })

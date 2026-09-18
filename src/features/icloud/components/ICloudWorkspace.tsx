@@ -55,7 +55,11 @@ import { ICloudScopeSwitcher } from './ICloudScopeSwitcher'
 import { ICloudReader } from './ICloudReader'
 import { ICloudSearchField } from './ICloudSearchField'
 import { ICloudAliasBatchForm } from './ICloudAliasBatchForm'
-import { accountChannelAvailability, hasUsableAliasChannel } from '../model/icloud-alias-batch'
+import {
+  accountChannelAvailability,
+  aliasChannelBlockedMessage,
+  hasUsableAliasChannel,
+} from '../model/icloud-alias-batch'
 import { ListScrollTopHeading } from '../../../shared/ui/mail-workspace/ListScrollTopHeading'
 
 function Spinner({ size = 17 }: { size?: number }) {
@@ -113,11 +117,7 @@ export function ICloudWorkspace({ userId, enabled, remoteImagesEnabled }: {
   // rejected, and the dialog behind it could then only report an exhausted
   // budget for a window nothing ever spent.
   const canCreateAlias = Boolean(selected && hasUsableAliasChannel(selected))
-  const createAliasHint = canCreateAlias
-    ? t('创建隐藏邮箱')
-    : selected?.appleAccountStatus === 'expired'
-      ? t('Apple Account 登录态已过期，请重新导入。')
-      : t('配置 Cookie 或 Apple Account 后可创建隐藏邮箱')
+  const createAliasHint = canCreateAlias ? t('创建隐藏邮箱') : aliasChannelBlockedMessage(selected)
   const activeAlias = aliases.find((alias) => alias.email === selectedAlias)
   const activeMainAddress = selected?.hasAppPassword && selected.icloudEmail === selectedAlias
     ? selected.icloudEmail

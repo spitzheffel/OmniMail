@@ -145,8 +145,11 @@ function objectRows(value: unknown): Record<string, unknown>[] | undefined {
  * comes first in key order — typically forwardToEmails, the user's own address.
  */
 function namedRows(value: unknown): Record<string, unknown>[] | undefined {
-  if (!isPlainObject(value)) return undefined
-  const own = value.hmeEmails
+  // Arrays are walked as well as objects: Apple wraps its payload differently
+  // per region, and `hmeEmails` sitting inside a list element is still the key
+  // that names the answer. Only isPlainObject decides what counts as a row.
+  if (!value || typeof value !== 'object') return undefined
+  const own = (value as { hmeEmails?: unknown }).hmeEmails
   if (Array.isArray(own)) return own.filter(isPlainObject)
   for (const child of Object.values(value)) {
     const nested = namedRows(child)
@@ -159,7 +162,10 @@ function namedRows(value: unknown): Record<string, unknown>[] | undefined {
 function firstObjectArray(value: unknown): { rows: Record<string, unknown>[]; found: boolean } {
   const direct = objectRows(value)
   if (direct) return { rows: direct, found: true }
-  if (!isPlainObject(value)) return { rows: [], found: false }
+  // Same reason as above: a mixed array can still hold the object that carries
+  // the list, and refusing to descend into it reports the whole payload as
+  // unrecognised — a 502 for a shape we could have read.
+  if (!value || typeof value !== 'object') return { rows: [], found: false }
   for (const child of Object.values(value)) {
     const nested = firstObjectArray(child)
     if (nested.found) return nested

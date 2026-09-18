@@ -418,12 +418,23 @@ export class ICloudAccountStore {
    * Absolute counters, for callers that just read Apple's authoritative list.
    * Session writers must not use this: they load the account, wait on Apple,
    * then save, so their snapshot would regress a concurrent create.
+   *
+   * `knownTotal` is what alias_total said when this request read the account.
+   * A listing is only authoritative for the state it observed, so if a create
+   * has incremented the row since, that increment is the newer fact and the
+   * write is skipped — the next listing reconciles. Required rather than
+   * optional so a new caller has to decide what its listing is relative to.
    */
-  async saveAliasSummary(id: string, total: number, active: number): Promise<void> {
+  async saveAliasSummary(
+    id: string, total: number, active: number, knownTotal: number,
+  ): Promise<void> {
     await this.env.DB.prepare(
       `UPDATE icloud_accounts SET alias_total = ?, alias_active = ?, updated_at = ?
-       WHERE id = ? AND user_id = ?`,
-    ).bind(Math.max(0, total), Math.max(0, active), new Date().toISOString(), id, this.userId).run()
+       WHERE id = ? AND user_id = ? AND alias_total = ?`,
+    ).bind(
+      Math.max(0, total), Math.max(0, active), new Date().toISOString(),
+      id, this.userId, knownTotal,
+    ).run()
   }
 
   /**

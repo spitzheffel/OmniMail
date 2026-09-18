@@ -187,6 +187,35 @@ describe('Apple Account private email client', () => {
     await expect(client.listAliases()).resolves.toEqual([])
   })
 
+  it('finds an unnamed alias list through a mixed array', async () => {
+    // No hmeEmails anywhere, so only the positional search can answer. Refusing
+    // to descend into an array whose entries are not all objects turns a
+    // readable payload into 'Apple Account 未返回可识别的隐私邮箱列表。'
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(Response.json({
+      sections: ['divider', { emails: [{ emailAddress: 'Shop@icloud.com', id: 'a1' }] }],
+    }))
+    const client = new AppleAccountClient(state())
+
+    await expect(client.listAliases()).resolves.toEqual([
+      expect.objectContaining({ email: 'shop@icloud.com', anonymousId: 'a1' }),
+    ])
+  })
+
+  it('reaches hmeEmails inside a mixed array before a top-level sibling', async () => {
+    // The name has to be findable wherever it sits, arrays included: stopping
+    // at objects leaves forwardToEmails as the first array the positional
+    // search meets, and the user's own address becomes the alias list.
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(Response.json({
+      forwardToEmails: [{ emailAddress: 'real@me.com', id: 'f1' }],
+      sections: ['divider', { hmeEmails: [{ emailAddress: 'Shop@icloud.com', id: 'a1' }] }],
+    }))
+    const client = new AppleAccountClient(state())
+
+    await expect(client.listAliases()).resolves.toEqual([
+      expect.objectContaining({ email: 'shop@icloud.com', anonymousId: 'a1' }),
+    ])
+  })
+
   it('skips an empty sibling array to reach the alias list', async () => {
     // [].every() is vacuously true; an empty list ahead of hmeEmails in key
     // order must not be mistaken for "this account has zero aliases".

@@ -14,6 +14,7 @@ import {
   releaseICloudAliasCreate,
   type ICloudAliasChannel,
 } from './icloud-alias-quota'
+import { refreshICloudAliasSummary } from './icloud-alias-summary'
 import { AppleAccountClient, type AppleAccountAlias } from './icloud-account-client'
 import {
   ICloudAccountStore,
@@ -188,31 +189,6 @@ export async function settleAppleClaim(env: Env, userId: string, accountId: stri
   }
 }
 
-async function refreshAliasSummaryForCreate(
-  store: ICloudAccountStore,
-  account: ICloudAccount,
-  client: ICloudClient,
-): Promise<void> {
-  account.cookies = client.cookies
-  account.status = 'active'
-  account.lastError = ''
-  let listed = false
-  try {
-    const aliases = await client.listAliases()
-    account.aliasTotal = aliases.length
-    account.aliasActive = aliases.filter((alias) => alias.active).length
-    account.lastValidated = new Date().toISOString()
-    listed = true
-  } catch (error) {
-    account.lastError = '隐藏邮箱操作已完成，但账号状态同步失败。'
-    if (error instanceof ICloudRemoteError && error.status === ICLOUD_CREDENTIAL_ERROR_STATUS) account.status = 'error'
-  }
-  await store.saveCookies(account)
-  // The create already landed upstream. Writing the pre-request snapshot when
-  // the listing failed would report one alias fewer than the account has.
-  if (listed) await store.saveAliasSummary(account.id, account.aliasTotal, account.aliasActive)
-}
-
 export async function createICloudAlias(
   env: Env,
   user: SessionUser,
@@ -357,7 +333,7 @@ export async function createICloudAlias(
       await settleWebClaim(env, user.id, accountId, error)
       throw error
     }
-    await refreshAliasSummaryForCreate(store, account, client)
+    await refreshICloudAliasSummary(store, account, client)
     await writeAudit(env, user.id, 'icloud.alias.create', accountId, ip, auditDetail(account, {
       alias: alias.email, label: alias.label, channel: 'icloud_web',
     }))

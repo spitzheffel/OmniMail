@@ -7,6 +7,7 @@ import {
   ICloudRemoteError,
 } from './icloud-apple'
 import { exhaustICloudAliasChannel } from './icloud-alias-quota'
+import { refreshICloudAliasSummary } from './icloud-alias-summary'
 import { AppleAccountClient } from './icloud-account-client'
 import {
   deleteICloudAppleAccount,
@@ -134,37 +135,6 @@ async function validateAccount(account: ICloudAccount): Promise<unknown> {
     account.lastError = error instanceof Error ? error.message.slice(0, 300) : 'iCloud 验证失败。'
     return error
   }
-}
-
-async function refreshAliasSummary(
-  store: ICloudAccountStore,
-  account: ICloudAccount,
-  client: ICloudClient,
-): Promise<void> {
-  account.cookies = client.cookies
-  account.status = 'active'
-  account.lastError = ''
-  let listed = false
-  try {
-    const aliases = await client.listAliases()
-    account.cookies = client.cookies
-    account.aliasTotal = aliases.length
-    account.aliasActive = aliases.filter((alias) => alias.active).length
-    account.lastValidated = new Date().toISOString()
-    listed = true
-  } catch (error) {
-    account.lastError = '隐藏邮箱操作已完成，但账号状态同步失败。'
-    if (error instanceof ICloudRemoteError && error.status === ICLOUD_CREDENTIAL_ERROR_STATUS) account.status = 'error'
-    console.warn('iCloud alias statistics refresh failed', {
-      accountId: account.id,
-      message: error instanceof Error ? error.message : String(error),
-    })
-  }
-  await store.saveCookies(account)
-  // Only a listing Apple actually answered may overwrite the counters. The
-  // catch above leaves the pre-request snapshot, which would undo an increment
-  // a concurrent create wrote while this request was in flight.
-  if (listed) await store.saveAliasSummary(account.id, account.aliasTotal, account.aliasActive)
 }
 
 export async function listICloudAccounts(env: Env, user: SessionUser): Promise<Response> {
@@ -298,10 +268,13 @@ export async function updateICloudCookies(
     const body = await jsonBody(request)
     const store = new ICloudAccountStore(env, user.id)
     const account = await store.get(id)
+    const knownTotal = account.aliasTotal
     account.cookies = parseICloudCookies(body.cookies)
     const validationError = await validateAccount(account)
     await store.saveCookies(account)
-    if (!validationError) await store.saveAliasSummary(account.id, account.aliasTotal, account.aliasActive)
+    if (!validationError) {
+      await store.saveAliasSummary(account.id, account.aliasTotal, account.aliasActive, knownTotal)
+    }
     await writeAudit(env, user.id, 'icloud.credentials.cookies', id, ip, iCloudAuditDetail(account))
     return Response.json({ account: publicICloudAccount(account) })
   } catch (error) {
@@ -346,6 +319,7 @@ export async function listICloudAliases(
     if (!accountId) throw new ICloudStoreError(400, '缺少 accountId。')
     const store = new ICloudAccountStore(env, user.id)
     const account = await store.get(accountId)
+    const knownTotal = account.aliasTotal
     if (!Object.keys(account.cookies).length && account.appleAccountState) {
       const appleClient = new AppleAccountClient(account.appleAccountState)
       try {
@@ -357,7 +331,7 @@ export async function listICloudAliases(
         account.aliasTotal = aliases.length
         account.aliasActive = aliases.filter((alias) => alias.active).length
         await store.saveAppleAccountState(account)
-        await store.saveAliasSummary(account.id, account.aliasTotal, account.aliasActive)
+        await store.saveAliasSummary(account.id, account.aliasTotal, account.aliasActive, knownTotal)
         return Response.json({ aliases })
       } catch (error) {
         if (error instanceof ICloudRemoteError && error.code === APPLE_ACCOUNT_ERROR_CODES.auth) {
@@ -387,7 +361,7 @@ export async function listICloudAliases(
       account.lastValidated = new Date().toISOString()
       account.lastError = ''
       await store.saveCookies(account)
-      await store.saveAliasSummary(account.id, account.aliasTotal, account.aliasActive)
+      await store.saveAliasSummary(account.id, account.aliasTotal, account.aliasActive, knownTotal)
       return Response.json({ aliases })
     } catch (error) {
       account.cookies = client.cookies
@@ -427,6 +401,13 @@ export async function previewICloudAlias(
         await exhaustICloudAliasChannel(env.DB, user.id, accountId, 'icloud_web').catch(() => undefined)
       }
       account.cookies = client.cookies
+      // A throttle is not worth recording, but a jar Apple has rejected is: the
+      // account list would otherwise keep showing it as healthy and the user
+      // would go on hitting the same wall. Same rule as listICloudAliases.
+      if (error instanceof ICloudRemoteError && error.status === ICLOUD_CREDENTIAL_ERROR_STATUS) {
+        account.status = 'error'
+        account.lastError = error.message.slice(0, 300)
+      }
       await store.saveCookies(account).catch(() => undefined)
       throw error
     }
@@ -463,7 +444,7 @@ export async function updateICloudAlias(
     const auditAlias = await aliasForAudit(client, accountId, anonymousId)
     if (action === 'deactivate') await client.deactivate(anonymousId)
     else await client.reactivate(anonymousId)
-    await refreshAliasSummary(store, account, client)
+    await refreshICloudAliasSummary(store, account, client)
     await writeAudit(env, user.id, `icloud.alias.${action}`, accountId, ip, iCloudAuditDetail(account, {
       anonymousId,
       alias: auditAlias?.email,
@@ -494,7 +475,7 @@ export async function deleteICloudAlias(
     const client = new ICloudClient(account.cookies, account.host)
     const auditAlias = await aliasForAudit(client, accountId, anonymousId)
     await client.delete(anonymousId)
-    await refreshAliasSummary(store, account, client)
+    await refreshICloudAliasSummary(store, account, client)
     await writeAudit(env, user.id, 'icloud.alias.delete', accountId, ip, iCloudAuditDetail(account, {
       anonymousId,
       alias: auditAlias?.email,

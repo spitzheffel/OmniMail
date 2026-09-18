@@ -394,6 +394,38 @@ describe('iCloud alias counters', () => {
     })
   })
 
+  it('yields to a create that landed after the listing was taken', async () => {
+    // A listing is only authoritative for the state it saw. Writing it over an
+    // increment that arrived later drops an alias the account really has.
+    const store = storeStore()
+    await store.insert(seededAccount('icloud-summary-race', { aliasTotal: 10, aliasActive: 10 }))
+
+    const raced = new ICloudAccountStore(
+      { ...env, DB: racingDb(env.DB, 'alias_total = ?', () => (
+        store.addAliasSummary('icloud-summary-race', 1)
+      )) } as typeof env,
+      STORE_USER,
+    )
+    await raced.saveAliasSummary('icloud-summary-race', 10, 10, 10)
+
+    await expect(listed('icloud-summary-race')).resolves.toMatchObject({
+      aliasTotal: 11, aliasActive: 11,
+    })
+  })
+
+  it('still applies a listing that found one alias fewer', async () => {
+    // The guard must not block the legitimate case it exists alongside: a
+    // delete lowers the count and nothing else touched the row.
+    const store = storeStore()
+    await store.insert(seededAccount('icloud-summary-delete', { aliasTotal: 10, aliasActive: 10 }))
+
+    await store.saveAliasSummary('icloud-summary-delete', 9, 9, 10)
+
+    await expect(listed('icloud-summary-delete')).resolves.toMatchObject({
+      aliasTotal: 9, aliasActive: 9,
+    })
+  })
+
   it('applies two concurrent creates as two increments', async () => {
     await storeStore().insert(seededAccount('icloud-counters-race', { aliasTotal: 10, aliasActive: 9 }))
 
@@ -515,6 +547,21 @@ describe('iCloud alias handler failure paths', () => {
     expect(response.status).toBe(502)
     await expect(appleStatus('icloud-refresh-claim'))
       .resolves.toMatchObject({ apple_account_status: 'active' })
+  })
+
+  it('marks the account when Apple rejects the jar at preview time', async () => {
+    // The preview now persists the rotated cookies on failure, so it also has
+    // to persist the failure; otherwise the list keeps showing the account as
+    // healthy and the user walks into the same wall every time.
+    await storeStore().insert(seededAccount('icloud-preview-dead', { cookies: { session: 'value' } }))
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response('', { status: 401 }))
+
+    const response = await previewICloudAlias(
+      env, STORE_SESSION, aliasRequest({ accountId: 'icloud-preview-dead' }),
+    )
+
+    expect(response.status).toBe(422)
+    await expect(listed('icloud-preview-dead')).resolves.toMatchObject({ status: 'error' })
   })
 
   it('spends no slot when the service lookup is throttled on the draft path', async () => {

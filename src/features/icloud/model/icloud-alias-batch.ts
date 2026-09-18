@@ -1,3 +1,4 @@
+import { t } from '../../../shared/i18n'
 import type { ICloudAccount, ICloudAliasChannel, ICloudAliasQuotaChannel } from '../../../shared/api'
 
 /** `auto` fills the Apple Account budget first, then spills to the cookie channel. */
@@ -114,6 +115,17 @@ export function accountChannelAvailability(
 
 export function hasUsableAliasChannel(account: AliasChannelAccount): boolean {
   return Object.values(accountChannelAvailability(account)).some(Boolean)
+}
+
+/**
+ * Why the create flow is closed, already translated. The workspace entry point
+ * and the dialog behind it both show this; wording it separately in each is how
+ * they came to disagree about which of the two reasons applies.
+ */
+export function aliasChannelBlockedMessage(account?: AliasChannelAccount): string {
+  return account?.appleAccountStatus === 'expired'
+    ? t('Apple Account 登录态已过期，请重新导入。')
+    : t('配置 Cookie 或 Apple Account 后可创建隐藏邮箱')
 }
 
 /** A 429 from the alias endpoints is always the hourly cap. */

@@ -91,6 +91,13 @@ describe('ICloudAliasBatchForm', () => {
     expect(html).not.toContain('本小时额度已用完')
   })
 
+  it('asks for credentials rather than a re-import when there are none', () => {
+    const html = render({})
+
+    expect(html).toContain('配置 Cookie 或 Apple Account 后可创建隐藏邮箱')
+    expect(html).not.toContain('Apple Account 登录态已过期')
+  })
+
   it('keeps the budget wording while one channel is still usable', () => {
     const html = render({ hasCookies: true, hasAppleAccount: true, appleAccountStatus: 'expired' })
 
