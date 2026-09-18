@@ -4,6 +4,7 @@ import { t } from '../../../shared/i18n'
 import {
   ICLOUD_ALIAS_CHANNEL_ORDER,
   channelRemaining,
+  isAliasQuotaRejection,
   type AliasBatchItem,
   type ICloudAliasChannelChoice,
 } from './icloud-alias-batch'
@@ -37,11 +38,6 @@ export type AliasBatchRunResult = {
   items: AliasBatchItem[]
   created: CreatedAlias[]
   remaining: Record<ICloudAliasChannel, number>
-}
-
-function quotaRejection(error: unknown): boolean {
-  return typeof (error as { status?: unknown } | null)?.status === 'number'
-    && (error as { status: number }).status === 429
 }
 
 export async function runAliasBatch(options: AliasBatchRunOptions): Promise<AliasBatchRunResult> {
@@ -112,7 +108,7 @@ export async function runAliasBatch(options: AliasBatchRunOptions): Promise<Alia
       }
       publish()
     } catch (error) {
-      if (quotaRejection(error)) {
+      if (isAliasQuotaRejection(error)) {
         exhausted.add(item.channel)
         remaining[item.channel] = 0
         const alternative = reroute(item.channel)

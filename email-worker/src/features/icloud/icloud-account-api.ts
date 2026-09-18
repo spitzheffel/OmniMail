@@ -196,16 +196,21 @@ async function refreshAliasSummaryForCreate(
   account.cookies = client.cookies
   account.status = 'active'
   account.lastError = ''
+  let listed = false
   try {
     const aliases = await client.listAliases()
     account.aliasTotal = aliases.length
     account.aliasActive = aliases.filter((alias) => alias.active).length
     account.lastValidated = new Date().toISOString()
+    listed = true
   } catch (error) {
     account.lastError = '隐藏邮箱操作已完成，但账号状态同步失败。'
     if (error instanceof ICloudRemoteError && error.status === ICLOUD_CREDENTIAL_ERROR_STATUS) account.status = 'error'
   }
   await store.saveCookies(account)
+  // The create already landed upstream. Writing the pre-request snapshot when
+  // the listing failed would report one alias fewer than the account has.
+  if (listed) await store.saveAliasSummary(account.id, account.aliasTotal, account.aliasActive)
 }
 
 export async function createICloudAlias(
@@ -276,7 +281,6 @@ export async function createICloudAlias(
           const { created, remaining } = outcome
           account.appleAccountState = client.state; account.appleAccountStatus = 'active'
           account.appleAccountExpiresAt = client.state.expiresAt; account.appleAccountError = ''
-          account.aliasTotal += 1; account.aliasActive += created.active ? 1 : 0
           await store.saveAppleAccountState(account)
           await store.addAliasSummary(accountId, created.active ? 1 : 0)
           await writeAudit(env, user.id, 'icloud.alias.create', accountId, ip, auditDetail(account, {
@@ -300,12 +304,20 @@ export async function createICloudAlias(
           if (error.code === APPLE_ACCOUNT_ERROR_CODES.auth) account.appleAccountStatus = 'expired'
           account.appleAccountError = error.message.slice(0, 300)
           await store.saveAppleAccountState(account).catch(() => undefined)
-        } else if (refreshed) {
+        } else if (refreshed && !(error instanceof ICloudAliasQuotaError)) {
           // A D1 or runtime failure after the refresh would otherwise drop a
           // scnt Apple has already rotated, and the next create would read as
-          // expired. Quota rejections keep their own persistence above.
+          // expired. Quota rejections already persisted above, and re-running
+          // this would cost a second encrypt and a second write for nothing.
+          //
+          // The status matters as much as the state: an explicit
+          // channel:'apple_account' bypasses the availability check, so this
+          // path is reachable for a row still marked expired. Leaving it that
+          // way would keep a session Apple just accepted hidden from the UI.
           account.appleAccountState = client.state
           account.appleAccountExpiresAt = client.state.expiresAt
+          account.appleAccountStatus = 'active'
+          account.appleAccountError = ''
           await store.saveAppleAccountState(account).catch(() => undefined)
         }
         if (!mayFallBack || !appleAccountFailure(error)) throw error
@@ -313,6 +325,12 @@ export async function createICloudAlias(
     }
     if (!hasCookies) throw new ICloudStoreError(400, '该账号尚未配置可创建隐藏邮箱的登录态。')
     const client = new ICloudClient(account.cookies, account.host, previewId || undefined)
+    // A draft card arrives with email+previewId already set, so generateAlias()
+    // below is skipped and reserveAlias() would be the first call to resolve the
+    // service — inside the claim window. validate() throttles for reasons that
+    // have nothing to do with the cap, and settleWebClaim can neither saturate
+    // nor refund that, so the slot would simply burn. Pay the cost up front.
+    await client.ensureService()
     // /v1/hme/generate only asks Apple for a candidate address; /v1/hme/reserve
     // is what spends the budget. Claiming between the two keeps credential and
     // entitlement failures from burning a slot they never reached.

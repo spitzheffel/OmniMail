@@ -15,6 +15,25 @@ function validationResponse(): Response {
   })
 }
 
+/**
+ * A fresh instance per call on purpose: request() retries a throttled GET, and
+ * a shared Response fails the second read with "body already read", which turns
+ * the throttle these tests mock into a generic transport failure.
+ */
+function throttled(): Response {
+  return new Response('Too Many Requests', { status: 429 })
+}
+
+/** Resolve the service on the first call, then throttle everything after it. */
+function throttledAfterValidation(): () => Promise<Response> {
+  let validated = false
+  return async () => {
+    if (validated) return throttled()
+    validated = true
+    return validationResponse()
+  }
+}
+
 function chinaValidationResponse(): Response {
   return Response.json({
     webservices: { premiummailsettings: { url: 'https://p71-maildomainws.icloud.com.cn' } },
@@ -193,25 +212,32 @@ describe('legacy Hide My Email failure classification', () => {
     // validate() hits setup.icloud.com, which throttles independently of the
     // Hide My Email cap. Labelling it as the cap made settleWebClaim saturate
     // the whole hour with no alias created.
-    vi.spyOn(globalThis, 'fetch')
-      .mockResolvedValue(new Response('Too Many Requests', { status: 429 }))
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => throttled())
 
-    const error = await new ICloudClient({ session: 'value' }, 'icloud.com')
-      .createAlias('Shop').catch((reason) => reason)
-
-    expect(error).toMatchObject({ status: 502, definitive: false })
-    expect((error as ICloudRemoteError).code).not.toBe('icloud_web_hme_limit')
+    await expect(new ICloudClient({ session: 'value' }, 'icloud.com').createAlias('Shop'))
+      .rejects.toMatchObject({ status: 502, definitive: false, code: 'icloud_web_throttled' })
   })
 
   it('does not read a throttled alias listing as the hourly cap', async () => {
-    vi.spyOn(globalThis, 'fetch')
-      .mockResolvedValueOnce(validationResponse())
-      .mockResolvedValue(new Response('Too Many Requests', { status: 429 }))
+    // Asserting on a resolved value's .code would pass on any success, so the
+    // rejection itself is part of the contract here.
+    vi.spyOn(globalThis, 'fetch').mockImplementation(throttledAfterValidation())
 
-    const error = await new ICloudClient({ session: 'value' }, 'icloud.com')
-      .listAliases().catch((reason) => reason)
+    await expect(new ICloudClient({ session: 'value' }, 'icloud.com').listAliases())
+      .rejects.toMatchObject({ status: 502, definitive: false, code: 'icloud_web_throttled' })
+  })
 
-    expect((error as ICloudRemoteError).code).not.toBe('icloud_web_hme_limit')
+  it('exposes the service lookup so it can run before a slot is claimed', async () => {
+    // The draft-card path supplies email+previewId, so generateAlias() is
+    // skipped and reserveAlias() would be the first call to resolve the
+    // service. createICloudAlias calls ensureService() before claiming so that
+    // this throttle cannot reach settleWebClaim, which can neither saturate the
+    // window for it nor refund it.
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => throttled())
+    const client = new ICloudClient({ session: 'value' }, 'icloud.com', 'preview-1')
+
+    await expect(client.ensureService())
+      .rejects.toMatchObject({ status: 502, code: 'icloud_web_throttled' })
   })
 
   it('recognises the hourly cap from Apple prose', async () => {

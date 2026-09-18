@@ -127,33 +127,59 @@ export interface AppleAccountAlias {
   createdAt: string
 }
 
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
 function objectRows(value: unknown): Record<string, unknown>[] | undefined {
-  return Array.isArray(value)
-    && value.every((item) => item && typeof item === 'object' && !Array.isArray(item))
+  return Array.isArray(value) && value.every(isPlainObject)
     ? value as Record<string, unknown>[]
     : undefined
+}
+
+/**
+ * Apple's own key, at any depth. Deliberately more tolerant than objectRows:
+ * the key names the list, so a stray null or a plain string entry must not
+ * demote us to the positional search, which would then pick whichever array
+ * comes first in key order — typically forwardToEmails.
+ */
+function namedRows(value: unknown): Record<string, unknown>[] | undefined {
+  if (!isPlainObject(value)) return undefined
+  const own = value.hmeEmails
+  if (Array.isArray(own) && (!own.length || own.some(isPlainObject))) return own.filter(isPlainObject)
+  for (const child of Object.values(value)) {
+    const nested = namedRows(child)
+    if (nested) return nested
+  }
+  return undefined
+}
+
+/** Positional fallback for envelopes that do not name the list at all. */
+function firstObjectArray(value: unknown): { rows: Record<string, unknown>[]; found: boolean } {
+  const direct = objectRows(value)
+  if (direct) return { rows: direct, found: true }
+  if (!isPlainObject(value)) return { rows: [], found: false }
+  for (const child of Object.values(value)) {
+    const nested = firstObjectArray(child)
+    if (nested.found) return nested
+  }
+  return { rows: [], found: false }
 }
 
 /**
  * Locate the alias array in Apple's envelope. `found` distinguishes a genuinely
  * empty list from a payload shape we do not understand — callers must not treat
  * the latter as "this account has zero aliases".
+ *
+ * hmeEmails wins outright wherever it sits, empty or not: `[].every()` is
+ * vacuously true, so the positional search cannot tell an empty alias list from
+ * a populated sibling such as forwardToEmails, and picking the sibling would
+ * publish the user's real forwarding address as a Hide My Email alias.
  */
 function aliasArray(value: unknown): { rows: Record<string, unknown>[]; found: boolean } {
-  const direct = objectRows(value)
-  if (direct) return { rows: direct, found: true }
-  if (!value || typeof value !== 'object') return { rows: [], found: false }
-  // Apple's own key wins outright, empty or not. `[].every()` is vacuously
-  // true, so the generic search below cannot tell an empty alias list from a
-  // populated sibling such as forwardToEmails — and picking the sibling would
-  // publish the user's real forwarding address as a Hide My Email alias.
-  const named = objectRows((value as { hmeEmails?: unknown }).hmeEmails)
+  const named = namedRows(value)
   if (named) return { rows: named, found: true }
-  for (const child of Object.values(value)) {
-    const nested = aliasArray(child)
-    if (nested.found) return nested
-  }
-  return { rows: [], found: false }
+  return firstObjectArray(value)
 }
 
 function aliasFromValue(value: Record<string, unknown>): AppleAccountAlias | null {

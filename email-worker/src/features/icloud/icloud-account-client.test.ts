@@ -132,12 +132,44 @@ describe('Apple Account private email client', () => {
   it('reports zero aliases rather than borrowing a populated sibling array', async () => {
     // hmeEmails is authoritative even when empty; picking forwardToEmails would
     // publish the user's real forwarding address as a Hide My Email alias.
+    // forwardToEmails comes first on purpose — in the other order the bug this
+    // guards against cannot show up at all.
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(Response.json({
-      result: { hmeEmails: [], forwardToEmails: [{ emailAddress: 'real@me.com', id: 'f1' }] },
+      result: { forwardToEmails: [{ emailAddress: 'real@me.com', id: 'f1' }], hmeEmails: [] },
     }))
     const client = new AppleAccountClient(state())
 
     await expect(client.listAliases()).resolves.toEqual([])
+  })
+
+  it('reads hmeEmails from a deeper level than the sibling it competes with', async () => {
+    // A level-local name check never reaches this one: the loop matches
+    // forwardToEmails at the top and returns before descending into result.
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(Response.json({
+      forwardToEmails: [{ emailAddress: 'real@me.com', id: 'f1' }],
+      result: { hmeEmails: [{ emailAddress: 'Shop@icloud.com', id: 'a1' }] },
+    }))
+    const client = new AppleAccountClient(state())
+
+    await expect(client.listAliases()).resolves.toEqual([
+      expect.objectContaining({ email: 'shop@icloud.com', anonymousId: 'a1' }),
+    ])
+  })
+
+  it('keeps a ragged hmeEmails array rather than falling back to a sibling', async () => {
+    // One null entry used to fail the all-objects test and hand the answer to
+    // forwardToEmails, so a real alias list became the user's own address.
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(Response.json({
+      result: {
+        forwardToEmails: [{ emailAddress: 'real@me.com', id: 'f1' }],
+        hmeEmails: [null, { emailAddress: 'Shop@icloud.com', id: 'a1' }],
+      },
+    }))
+    const client = new AppleAccountClient(state())
+
+    await expect(client.listAliases()).resolves.toEqual([
+      expect.objectContaining({ email: 'shop@icloud.com', anonymousId: 'a1' }),
+    ])
   })
 
   it('skips an empty sibling array to reach the alias list', async () => {

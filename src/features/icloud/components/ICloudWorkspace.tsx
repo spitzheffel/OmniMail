@@ -55,6 +55,7 @@ import { ICloudScopeSwitcher } from './ICloudScopeSwitcher'
 import { ICloudReader } from './ICloudReader'
 import { ICloudSearchField } from './ICloudSearchField'
 import { ICloudAliasBatchForm } from './ICloudAliasBatchForm'
+import { accountChannelAvailability, hasUsableAliasChannel } from '../model/icloud-alias-batch'
 import { ListScrollTopHeading } from '../../../shared/ui/mail-workspace/ListScrollTopHeading'
 
 function Spinner({ size = 17 }: { size?: number }) {
@@ -108,6 +109,15 @@ export function ICloudWorkspace({ userId, enabled, remoteImagesEnabled }: {
   const messageController = useRef<AbortController | null>(null)
   const openDeepLinkMessage = useEffectEvent((message: ICloudMessage) => openMessage(message))
   const selected = accounts.find((account) => account.id === selectedId)
+  // hasAppleAccount alone would keep this open for a session Apple has already
+  // rejected, and the dialog behind it could then only report an exhausted
+  // budget for a window nothing ever spent.
+  const canCreateAlias = Boolean(selected && hasUsableAliasChannel(selected))
+  const createAliasHint = canCreateAlias
+    ? t('创建隐藏邮箱')
+    : selected?.appleAccountStatus === 'expired'
+      ? t('Apple Account 登录态已过期，请重新导入。')
+      : t('配置 Cookie 或 Apple Account 后可创建隐藏邮箱')
   const activeAlias = aliases.find((alias) => alias.email === selectedAlias)
   const activeMainAddress = selected?.hasAppPassword && selected.icloudEmail === selectedAlias
     ? selected.icloudEmail
@@ -353,10 +363,10 @@ export function ICloudWorkspace({ userId, enabled, remoteImagesEnabled }: {
               <button className="icon-button" type="button" disabled={!enabled}
                 onClick={() => setAddOpen(true)} aria-label={t('添加 iCloud 账号')}
                 data-tooltip={t('添加 iCloud 账号')}><Plus size={17} /></button>
-              <button className="icon-button" type="button" disabled={!selected?.hasCookies && !selected?.hasAppleAccount}
+              <button className="icon-button" type="button" disabled={!canCreateAlias}
                 onClick={() => setCreateOpen(true)}
-                aria-label={t(selected?.hasCookies || selected?.hasAppleAccount ? '创建隐藏邮箱' : '配置 Cookie 或 Apple Account 后可创建隐藏邮箱')}
-                data-tooltip={t(selected?.hasCookies || selected?.hasAppleAccount ? '创建隐藏邮箱' : '配置 Cookie 或 Apple Account 后可创建隐藏邮箱')}><AtSign size={17} /></button>
+                aria-label={createAliasHint}
+                data-tooltip={createAliasHint}><AtSign size={17} /></button>
               <button className="icon-button" type="button" disabled={!selected}
                 onClick={() => selected && setCredentials(selected)} aria-label={t('账号设置')}
                 data-tooltip={t('账号设置')}><Settings2 size={17} /></button>
@@ -419,7 +429,7 @@ export function ICloudWorkspace({ userId, enabled, remoteImagesEnabled }: {
       </main>
 
       {addOpen && <AddICloudAccountDialog onClose={() => setAddOpen(false)} onChanged={loadAccounts} onCreated={(account) => { setAccounts((items) => items.some((item) => item.id === account.id) ? items.map((item) => item.id === account.id ? account : item) : [...items, account]); if (account.hasCookies || account.hasAppPassword || account.hasAppleAccount) setSelectedId(account.id); setNotice(t('iCloud 账号已添加')) }} />}
-      {createOpen && selected && <ICloudModal title={t('创建隐藏邮箱')} description={selected.hasAppleAccount
+      {createOpen && selected && <ICloudModal title={t('创建隐藏邮箱')} description={accountChannelAvailability(selected).apple_account
         ? t('Apple Account 会在提交时直接创建地址；本小时剩余额度显示在表单里。')
         : t('预览 Apple 生成的地址，确认后再创建；本小时剩余额度显示在表单里。')} onClose={() => setCreateOpen(false)}>{(close) => <ICloudAliasBatchForm account={selected} close={close} onCreated={async (createdAliases) => { const latest = createdAliases.at(-1); if (!latest) return; setSelectedAlias(latest.email); setNotice(t(createdAliases.length === 1 ? '新的隐藏邮箱已创建' : '已创建 {count} 个隐藏邮箱', { count: createdAliases.length })); await sync(latest.email, true) }} />}</ICloudModal>}
       {credentials && <ICloudAccountSettingsDialog account={credentials} onClose={() => setCredentials(null)} onChanged={async () => { clearICloudAccountCache(userId, credentials.id); await loadAccounts() }} onDeleted={async () => { clearICloudAccountCache(userId, credentials.id); await loadAccounts(); setAliases([]); setMessages([]); setInboxMethod('') }} onNotice={setNotice} />}

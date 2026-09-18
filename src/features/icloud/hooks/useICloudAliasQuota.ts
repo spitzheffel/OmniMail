@@ -1,19 +1,18 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, type ICloudAccount, type ICloudAliasChannel, type ICloudAliasQuotaChannel } from '../../../shared/api'
 import { errorMessage } from '../../../shared/api/errorMessage'
-import { ICLOUD_ALIAS_CHANNEL_ORDER, ICLOUD_ALIAS_FALLBACK_LIMITS } from '../model/icloud-alias-batch'
+import {
+  ICLOUD_ALIAS_CHANNEL_ORDER,
+  ICLOUD_ALIAS_FALLBACK_LIMITS,
+  accountChannelAvailability,
+} from '../model/icloud-alias-batch'
 
 /**
  * Rendered while the real numbers are in flight or unreachable. Availability is
  * known locally from the saved credentials, so only the budgets are guessed.
  */
 function fallbackChannels(account: ICloudAccount): ICloudAliasQuotaChannel[] {
-  const available: Record<ICloudAliasChannel, boolean> = {
-    // Mirrors getICloudAliasQuota: an expired session needs a re-import, not a
-    // batch of creates that each fail the same way.
-    apple_account: Boolean(account.hasAppleAccount) && account.appleAccountStatus !== 'expired',
-    icloud_web: Boolean(account.hasCookies),
-  }
+  const available = accountChannelAvailability(account)
   return ICLOUD_ALIAS_CHANNEL_ORDER.map((channel) => ({
     channel,
     available: available[channel],

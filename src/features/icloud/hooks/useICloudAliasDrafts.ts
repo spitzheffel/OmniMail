@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../../../shared/api'
 import { errorMessage } from '../../../shared/api/errorMessage'
-import { newAliasDraft, type AliasDraft } from '../model/icloud-alias-batch'
+import { isAliasQuotaRejection, newAliasDraft, type AliasDraft } from '../model/icloud-alias-batch'
 
 /**
  * Preview drafts for the legacy cookie channel, where the suggested address is
@@ -11,10 +11,21 @@ import { newAliasDraft, type AliasDraft } from '../model/icloud-alias-batch'
  * are chained one at a time; firing several in parallel makes that a
  * last-writer-wins race.
  */
-export function useICloudAliasDrafts(accountId: string, maximum: number, enabled: boolean) {
+export function useICloudAliasDrafts(
+  accountId: string,
+  maximum: number,
+  enabled: boolean,
+  onExhausted?: () => void,
+) {
   const [drafts, setDrafts] = useState<AliasDraft[]>(() => [newAliasDraft(crypto.randomUUID())])
   const firstDraftId = useRef(drafts[0].id)
   const draftsRef = useRef(drafts)
+  // Held in a ref so a caller's inline arrow cannot change preview's identity;
+  // that would re-run the mount effect, which invalidates the request in flight.
+  const exhausted = useRef(onExhausted)
+  exhausted.current = onExhausted
+  const enabledRef = useRef(enabled)
+  enabledRef.current = enabled
   const versions = useRef(new Map<string, number>())
   const inFlight = useRef(new Map<string, number>())
   const queue = useRef<Promise<unknown>>(Promise.resolve())
@@ -36,6 +47,10 @@ export function useICloudAliasDrafts(accountId: string, maximum: number, enabled
         update(id, { email: result.email, previewId: result.previewId })
       } catch (previewError) {
         if (versions.current.get(id) !== version) return
+        // /alias/preview spends nothing, but Apple answers it with the same cap.
+        // Folding that into the quota is what stops the dialog from advertising
+        // slots and letting every further card repeat the round-trip.
+        if (isAliasQuotaRejection(previewError)) exhausted.current?.()
         update(id, { error: errorMessage(previewError) })
       } finally {
         // The version guard decides whether the *result* is still wanted; the
@@ -115,7 +130,10 @@ export function useICloudAliasDrafts(accountId: string, maximum: number, enabled
     const fresh = newAliasDraft(crypto.randomUUID())
     firstDraftId.current = fresh.id
     setDrafts([fresh])
-    void preview(fresh.id)
+    // After a fully successful batch the window is saturated and submit is
+    // disabled, so a preview here could only produce a failed round-trip and an
+    // error card. The mount effect fires one as soon as the budget returns.
+    if (enabledRef.current) void preview(fresh.id)
   }, [preview])
 
   return { drafts, preview, add, remove, prune, setLabel, busy: drafts.some((draft) => draft.loading) }

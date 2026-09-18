@@ -1,13 +1,16 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { ICloudAliasChannel, ICloudAliasQuotaChannel } from '../../../shared/api'
 import {
+  accountChannelAvailability,
   aliasBatchLabel,
   availableChannels,
   batchSummary,
   buildAliasBatch,
+  hasUsableAliasChannel,
   planAliasBatch,
   remainingFor,
   type AliasBatchItem,
+  type AliasChannelAccount,
 } from './icloud-alias-batch'
 import { runAliasBatch, type AliasBatchApi } from './icloud-alias-batch-run'
 
@@ -20,6 +23,32 @@ function quota(
     { channel: 'icloud_web', available: true, limit: 5, used: 0, remaining: 5, resetsAt: '', ...web },
   ]
 }
+
+describe('account channel availability', () => {
+  function channels(overrides: Partial<AliasChannelAccount>): AliasChannelAccount {
+    return { hasCookies: false, hasAppleAccount: false, appleAccountStatus: 'none', ...overrides }
+  }
+
+  it('drops an Apple session the server has already marked expired', () => {
+    // Mirrors iCloudAliasChannels(): the create handler refuses it, so planning
+    // a batch onto it only produces a run of identical failures.
+    expect(accountChannelAvailability(channels({ hasAppleAccount: true })).apple_account).toBe(true)
+    expect(accountChannelAvailability(
+      channels({ hasAppleAccount: true, appleAccountStatus: 'expired' }),
+    ).apple_account).toBe(false)
+  })
+
+  it('reports no usable channel for an expired session with no cookie jar', () => {
+    expect(hasUsableAliasChannel(channels({ hasCookies: true }))).toBe(true)
+    expect(hasUsableAliasChannel(channels({ hasAppleAccount: true }))).toBe(true)
+    expect(hasUsableAliasChannel(
+      channels({ hasAppleAccount: true, appleAccountStatus: 'expired' }),
+    )).toBe(false)
+    expect(hasUsableAliasChannel(
+      channels({ hasAppleAccount: true, appleAccountStatus: 'expired', hasCookies: true }),
+    )).toBe(true)
+  })
+})
 
 let counter = 0
 const newId = () => `item-${++counter}`

@@ -1,4 +1,4 @@
-import type { ICloudAliasChannel, ICloudAliasQuotaChannel } from '../../../shared/api'
+import type { ICloudAccount, ICloudAliasChannel, ICloudAliasQuotaChannel } from '../../../shared/api'
 
 /** `auto` fills the Apple Account budget first, then spills to the cookie channel. */
 export type ICloudAliasChannelChoice = ICloudAliasChannel | 'auto'
@@ -90,6 +90,35 @@ export function channelRemaining(
 
 export function availableChannels(channels: ICloudAliasQuotaChannel[]): ICloudAliasChannel[] {
   return ICLOUD_ALIAS_CHANNEL_ORDER.filter((channel) => channelQuota(channels, channel)?.available)
+}
+
+export type AliasChannelAccount = Pick<
+  ICloudAccount, 'hasCookies' | 'hasAppleAccount' | 'appleAccountStatus'
+>
+
+/**
+ * Which channels the saved credentials can actually use, mirroring the server's
+ * iCloudAliasChannels(). An expired Apple session is not one of them: Apple has
+ * already rejected it, so offering it plans a batch onto slots that cannot be
+ * spent. Both the workspace entry point and the quota fallback read it here so
+ * they cannot disagree about what "has a login" means.
+ */
+export function accountChannelAvailability(
+  account: AliasChannelAccount,
+): Record<ICloudAliasChannel, boolean> {
+  return {
+    apple_account: Boolean(account.hasAppleAccount) && account.appleAccountStatus !== 'expired',
+    icloud_web: Boolean(account.hasCookies),
+  }
+}
+
+export function hasUsableAliasChannel(account: AliasChannelAccount): boolean {
+  return Object.values(accountChannelAvailability(account)).some(Boolean)
+}
+
+/** A 429 from the alias endpoints is always the hourly cap. */
+export function isAliasQuotaRejection(error: unknown): boolean {
+  return (error as { status?: unknown } | null)?.status === 429
 }
 
 /** How many aliases the chosen mode can still create this hour. */

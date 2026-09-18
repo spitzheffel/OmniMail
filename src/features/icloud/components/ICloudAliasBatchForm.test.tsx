@@ -82,6 +82,21 @@ describe('ICloudAliasBatchForm', () => {
     expect(html).toContain('创建项目 1/5')
   })
 
+  it('names the expired session rather than blaming the hourly budget', () => {
+    // No usable channel at all, so there is no correct window: reporting a
+    // spent budget sends the user off to wait for a reset that changes nothing.
+    const html = render({ hasAppleAccount: true, appleAccountStatus: 'expired' })
+
+    expect(html).toContain('Apple Account 登录态已过期，请重新导入。')
+    expect(html).not.toContain('本小时额度已用完')
+  })
+
+  it('keeps the budget wording while one channel is still usable', () => {
+    const html = render({ hasCookies: true, hasAppleAccount: true, appleAccountStatus: 'expired' })
+
+    expect(html).not.toContain('Apple Account 登录态已过期，请重新导入。')
+  })
+
   it('derives the ceiling from the usable channels rather than a fixed cap', () => {
     expect(render({ hasAppleAccount: true, hasCookies: true })).toContain('创建项目 1/25')
     expect(render({ hasAppleAccount: true })).toContain('创建项目 1/20')

@@ -235,6 +235,7 @@ export const enICloud: Record<string, string> = {
   '（额度为估算值，正在与 Apple 核对）': '(estimated budget, checking with Apple)',
   '（额度为估算值，无法与 Apple 核对）': '(estimated budget, could not check with Apple)',
   '本小时额度已用完': 'This hour is used up',
+  'Apple Account 登录态已过期，请重新导入。': 'The Apple Account session has expired; import it again.',
   '本小时创建额度已用完': 'This hour\'s creation budget is used up',
   '本次没有创建任何隐藏邮箱。': 'No Hide My Email addresses were created this time.',
   '等待 Apple 生成地址': 'Waiting for Apple to generate an address',

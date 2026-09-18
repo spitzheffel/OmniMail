@@ -1,6 +1,6 @@
 import { env } from 'cloudflare:workers'
 import { applyD1Migrations, createExecutionContext } from 'cloudflare:test'
-import { beforeAll, describe, expect, it } from 'vitest'
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import worker from '../src/index'
 import { createSessionToken, storeSession } from '../src/features/auth/session/auth'
 import {
@@ -11,10 +11,11 @@ import {
   readICloudAliasQuota,
   releaseICloudAliasCreate,
 } from '../src/features/icloud/icloud-alias-quota'
+import { createICloudAlias, previewICloudAlias } from '../src/features/icloud/icloud-api'
 import { encryptICloudCredential } from '../src/features/icloud/icloud-credentials'
 import { ICloudAccountStore, iCloudAliasChannels } from '../src/features/icloud/icloud-store'
-import type { ICloudAccount } from '../src/features/icloud/icloud-types'
-import type { Env as OmniMailEnv } from '../src/app/types'
+import type { AppleAccountState, ICloudAccount } from '../src/features/icloud/icloud-types'
+import type { Env as OmniMailEnv, SessionUser } from '../src/app/types'
 
 declare global {
   namespace Cloudflare {
@@ -41,6 +42,15 @@ beforeAll(async () => {
         id, email, display_name, password_hash, role, mailbox_limit,
         storage_quota_bytes, can_create_mailboxes, can_reply
       ) VALUES ('icloud-other', 'icloud-other@example.com', 'Other', 'test', 'user', 1, 1024, 1, 0)`,
+    ),
+    // The store suites below insert their own rows. Giving them a separate
+    // owner is what keeps 'lists only public metadata' from counting them —
+    // otherwise the whole file only passes in declaration order.
+    env.DB.prepare(
+      `INSERT INTO users (
+        id, email, display_name, password_hash, role, mailbox_limit,
+        storage_quota_bytes, can_create_mailboxes, can_reply
+      ) VALUES ('icloud-store', 'icloud-store@example.com', 'Store', 'test', 'user', 1, 1024, 1, 0)`,
     ),
   ])
   await Promise.all([
@@ -133,7 +143,24 @@ describe('iCloud account API', () => {
 describe('iCloud alias hourly quota', () => {
   // 2026-09-17T10:17:36Z — deliberately off an hour boundary.
   const NOW = 1_789_640_256
-  const HOUR_START = Math.floor(NOW / ICLOUD_ALIAS_HOUR_SECONDS) * ICLOUD_ALIAS_HOUR_SECONDS
+  // One hour per test, because a window resets on any hour it has not seen.
+  // Sharing one made every case depend on the rows its predecessors left
+  // behind, so the suite only passed in declaration order.
+  const AT = {
+    budget: NOW,
+    refusing: NOW + 1 * 3600,
+    channels: NOW + 2 * 3600,
+    refund: NOW + 3 * 3600,
+    // rollover claims in its own hour and again in the one after it.
+    rollover: NOW + 4 * 3600,
+    saturated: NOW + 6 * 3600,
+    scoped: NOW + 7 * 3600,
+  }
+  const APPLE_LIMIT = ICLOUD_ALIAS_HOURLY_LIMITS.apple_account
+
+  function hourStart(now: number): number {
+    return Math.floor(now / ICLOUD_ALIAS_HOUR_SECONDS) * ICLOUD_ALIAS_HOUR_SECONDS
+  }
 
   async function windowRow(channel: string) {
     return env.DB.prepare(
@@ -141,81 +168,109 @@ describe('iCloud alias hourly quota', () => {
     ).bind('icloud-account-1', channel).first<{ hour_started_at: number; hour_count: number }>()
   }
 
+  async function spendAppleBudget(now: number): Promise<void> {
+    for (let taken = 0; taken < APPLE_LIMIT; taken += 1) {
+      await claimICloudAliasCreate(env.DB, 'icloud-owner', 'icloud-account-1', 'apple_account', now)
+    }
+  }
+
   it('hands out exactly the channel budget and then refuses', async () => {
-    const limit = ICLOUD_ALIAS_HOURLY_LIMITS.apple_account
-    for (let taken = 1; taken <= limit; taken += 1) {
+    for (let taken = 1; taken <= APPLE_LIMIT; taken += 1) {
       await expect(
-        claimICloudAliasCreate(env.DB, 'icloud-owner', 'icloud-account-1', 'apple_account', NOW),
-      ).resolves.toEqual({ allowed: true, remaining: limit - taken })
+        claimICloudAliasCreate(env.DB, 'icloud-owner', 'icloud-account-1', 'apple_account', AT.budget),
+      ).resolves.toEqual({ allowed: true, remaining: APPLE_LIMIT - taken })
     }
 
     const denied = await claimICloudAliasCreate(
-      env.DB, 'icloud-owner', 'icloud-account-1', 'apple_account', NOW,
+      env.DB, 'icloud-owner', 'icloud-account-1', 'apple_account', AT.budget,
     )
-    expect(denied).toEqual({ allowed: false, retryAfter: HOUR_START + 3600 - NOW })
-    expect(await windowRow('apple_account')).toMatchObject({ hour_started_at: HOUR_START, hour_count: limit })
+    expect(denied).toEqual({ allowed: false, retryAfter: hourStart(AT.budget) + 3600 - AT.budget })
+    expect(await windowRow('apple_account'))
+      .toMatchObject({ hour_started_at: hourStart(AT.budget), hour_count: APPLE_LIMIT })
   })
 
   it('leaves the window untouched while it keeps refusing', async () => {
+    await spendAppleBudget(AT.refusing)
+
     for (let elapsed = 0; elapsed < 5; elapsed += 1) {
       const result = await claimICloudAliasCreate(
-        env.DB, 'icloud-owner', 'icloud-account-1', 'apple_account', NOW + elapsed,
+        env.DB, 'icloud-owner', 'icloud-account-1', 'apple_account', AT.refusing + elapsed,
       )
       expect(result.allowed).toBe(false)
-      if (!result.allowed) expect(NOW + elapsed + result.retryAfter).toBe(HOUR_START + 3600)
+      if (!result.allowed) {
+        expect(AT.refusing + elapsed + result.retryAfter).toBe(hourStart(AT.refusing) + 3600)
+      }
     }
-    expect(await windowRow('apple_account')).toMatchObject({ hour_started_at: HOUR_START })
+    expect(await windowRow('apple_account'))
+      .toMatchObject({ hour_started_at: hourStart(AT.refusing), hour_count: APPLE_LIMIT })
   })
 
   it('keeps the two channels on independent budgets', async () => {
+    await spendAppleBudget(AT.channels)
+
     await expect(
-      claimICloudAliasCreate(env.DB, 'icloud-owner', 'icloud-account-1', 'icloud_web', NOW),
+      claimICloudAliasCreate(env.DB, 'icloud-owner', 'icloud-account-1', 'icloud_web', AT.channels),
     ).resolves.toEqual({ allowed: true, remaining: ICLOUD_ALIAS_HOURLY_LIMITS.icloud_web - 1 })
   })
 
   it('refunds a reservation that never reached Apple', async () => {
-    await releaseICloudAliasCreate(env.DB, 'icloud-owner', 'icloud-account-1', 'icloud_web', NOW)
-    expect(await windowRow('icloud_web')).toMatchObject({ hour_count: 0 })
+    await expect(
+      claimICloudAliasCreate(env.DB, 'icloud-owner', 'icloud-account-1', 'icloud_web', AT.refund),
+    ).resolves.toMatchObject({ allowed: true })
+
+    await releaseICloudAliasCreate(env.DB, 'icloud-owner', 'icloud-account-1', 'icloud_web', AT.refund)
+
+    expect(await windowRow('icloud_web'))
+      .toMatchObject({ hour_started_at: hourStart(AT.refund), hour_count: 0 })
   })
 
   it('starts a clean budget once the hour rolls over', async () => {
-    const next = NOW + 3600
+    await spendAppleBudget(AT.rollover)
+
+    const next = AT.rollover + 3600
     await expect(
       claimICloudAliasCreate(env.DB, 'icloud-owner', 'icloud-account-1', 'apple_account', next),
-    ).resolves.toEqual({ allowed: true, remaining: ICLOUD_ALIAS_HOURLY_LIMITS.apple_account - 1 })
-    expect(await windowRow('apple_account')).toMatchObject({ hour_count: 1 })
+    ).resolves.toEqual({ allowed: true, remaining: APPLE_LIMIT - 1 })
+    expect(await windowRow('apple_account'))
+      .toMatchObject({ hour_started_at: hourStart(next), hour_count: 1 })
   })
 
   it('saturates the window when Apple reports its own cap', async () => {
-    const next = NOW + 3600
-    await exhaustICloudAliasChannel(env.DB, 'icloud-owner', 'icloud-account-1', 'apple_account', next)
-    expect(await windowRow('apple_account'))
-      .toMatchObject({ hour_count: ICLOUD_ALIAS_HOURLY_LIMITS.apple_account })
+    await exhaustICloudAliasChannel(
+      env.DB, 'icloud-owner', 'icloud-account-1', 'apple_account', AT.saturated,
+    )
+
+    expect(await windowRow('apple_account')).toMatchObject({ hour_count: APPLE_LIMIT })
     await expect(
-      claimICloudAliasCreate(env.DB, 'icloud-owner', 'icloud-account-1', 'apple_account', next),
+      claimICloudAliasCreate(env.DB, 'icloud-owner', 'icloud-account-1', 'apple_account', AT.saturated),
     ).resolves.toMatchObject({ allowed: false })
   })
 
   it('reports per-channel state scoped to the owning user', async () => {
-    const next = NOW + 3600
-    await expect(readICloudAliasQuota(env.DB, 'icloud-owner', 'icloud-account-1', next))
+    await exhaustICloudAliasChannel(
+      env.DB, 'icloud-owner', 'icloud-account-1', 'apple_account', AT.scoped,
+    )
+
+    await expect(readICloudAliasQuota(env.DB, 'icloud-owner', 'icloud-account-1', AT.scoped))
       .resolves.toMatchObject([
-        { channel: 'apple_account', used: ICLOUD_ALIAS_HOURLY_LIMITS.apple_account, remaining: 0 },
+        { channel: 'apple_account', used: APPLE_LIMIT, remaining: 0 },
         { channel: 'icloud_web', used: 0 },
       ])
     // The same account id read as a different user sees none of that usage.
-    await expect(readICloudAliasQuota(env.DB, 'icloud-other', 'icloud-account-1', next))
+    await expect(readICloudAliasQuota(env.DB, 'icloud-other', 'icloud-account-1', AT.scoped))
       .resolves.toMatchObject([
-        { channel: 'apple_account', used: 0, remaining: ICLOUD_ALIAS_HOURLY_LIMITS.apple_account },
+        { channel: 'apple_account', used: 0, remaining: APPLE_LIMIT },
         { channel: 'icloud_web', used: 0, remaining: ICLOUD_ALIAS_HOURLY_LIMITS.icloud_web },
       ])
   })
 })
 
+const STORE_USER = 'icloud-store'
+
 function seededAccount(id: string, overrides: Partial<ICloudAccount> = {}): ICloudAccount {
   return {
     id,
-    userId: 'icloud-owner',
+    userId: STORE_USER,
     name: 'Cookieless',
     realEmail: '',
     icloudEmail: 'owner@icloud.com',
@@ -232,50 +287,252 @@ function seededAccount(id: string, overrides: Partial<ICloudAccount> = {}): IClo
   } as ICloudAccount
 }
 
+function storeStore(): ICloudAccountStore {
+  return new ICloudAccountStore(env, STORE_USER)
+}
+
+function listed(id: string) {
+  return storeStore().list().then((items) => items.find((item) => item.id === id))
+}
+
+/**
+ * Run `before` between the bind and the run of the first prepared statement
+ * matching `needle`. The store only ever calls .bind().run() on the statement
+ * we intercept, so the narrow stand-in is enough.
+ */
+function racingDb(db: D1Database, needle: string, before: () => Promise<unknown>): D1Database {
+  let armed = true
+  return {
+    prepare(sql: string) {
+      const statement = db.prepare(sql)
+      if (!armed || !sql.includes(needle)) return statement
+      armed = false
+      return {
+        bind: (...args: unknown[]) => {
+          const bound = statement.bind(...args)
+          return { run: async () => { await before(); return bound.run() } } as D1PreparedStatement
+        },
+      } as D1PreparedStatement
+    },
+  } as D1Database
+}
+
 describe('iCloud cookie jar storage', () => {
   it('stores an empty jar as empty so SQL availability agrees with the create path', async () => {
     // Encrypting '{}' yields real ciphertext, which made list()'s
-    // cookies_cipher <> '' advertised a cookie channel the create path refuses.
-    const store = new ICloudAccountStore(env, 'icloud-owner')
-    await store.insert(seededAccount('icloud-cookieless'))
+    // cookies_cipher <> '' advertise a cookie channel the create path refuses.
+    await storeStore().insert(seededAccount('icloud-cookieless'))
 
-    const listed = (await store.list()).find((item) => item.id === 'icloud-cookieless')
-    expect(listed).toMatchObject({ hasCookies: false, hasAppPassword: true })
+    await expect(listed('icloud-cookieless')).resolves.toMatchObject({
+      hasCookies: false, hasAppPassword: true,
+    })
   })
 
   it('normalizes a legacy row that stored the ciphertext of an empty jar', async () => {
-    const store = new ICloudAccountStore(env, 'icloud-owner')
-    await store.insert(seededAccount('icloud-legacy-jar'))
+    await storeStore().insert(seededAccount('icloud-legacy-jar'))
     // Exactly what the pre-fix code wrote for a cookie-less account.
-    const legacy = await encryptICloudCredential(
-      env, '{}', 'icloud-owner:icloud-legacy-jar:cookies',
+    await env.DB.prepare('UPDATE icloud_accounts SET cookies_cipher = ? WHERE id = ?').bind(
+      await encryptICloudCredential(env, '{}', `${STORE_USER}:icloud-legacy-jar:cookies`),
+      'icloud-legacy-jar',
+    ).run()
+    await expect(listed('icloud-legacy-jar')).resolves.toMatchObject({ hasCookies: true })
+
+    await storeStore().get('icloud-legacy-jar')
+
+    await expect(listed('icloud-legacy-jar')).resolves.toMatchObject({ hasCookies: false })
+  })
+
+  it('leaves a jar saved between the read and the normalizing write alone', async () => {
+    // The normalizing UPDATE carries WHERE cookies_cipher = ? precisely so it
+    // cannot erase a jar another request stored while this read was in flight.
+    await storeStore().insert(seededAccount('icloud-legacy-race'))
+    await env.DB.prepare('UPDATE icloud_accounts SET cookies_cipher = ? WHERE id = ?').bind(
+      await encryptICloudCredential(env, '{}', `${STORE_USER}:icloud-legacy-race:cookies`),
+      'icloud-legacy-race',
+    ).run()
+
+    const raced = new ICloudAccountStore(
+      { ...env, DB: racingDb(env.DB, "cookies_cipher = ''", () => storeStore().saveCookies(
+        seededAccount('icloud-legacy-race', { cookies: { session: 'live' } }),
+      )) } as typeof env,
+      STORE_USER,
     )
-    await env.DB.prepare('UPDATE icloud_accounts SET cookies_cipher = ? WHERE id = ?')
-      .bind(legacy, 'icloud-legacy-jar').run()
-    expect((await store.list()).find((item) => item.id === 'icloud-legacy-jar'))
-      .toMatchObject({ hasCookies: true })
+    await raced.get('icloud-legacy-race')
 
-    await store.get('icloud-legacy-jar')
+    await expect(storeStore().get('icloud-legacy-race'))
+      .resolves.toMatchObject({ cookies: { session: 'live' } })
+  })
 
-    expect((await store.list()).find((item) => item.id === 'icloud-legacy-jar'))
-      .toMatchObject({ hasCookies: false })
+  it('rejects a jar whose plaintext is not an object with a readable error', async () => {
+    // JSON.parse('null') succeeds; every reader then calls Object.keys on it.
+    await storeStore().insert(seededAccount('icloud-null-jar'))
+    await env.DB.prepare('UPDATE icloud_accounts SET cookies_cipher = ? WHERE id = ?').bind(
+      await encryptICloudCredential(env, 'null', `${STORE_USER}:icloud-null-jar:cookies`),
+      'icloud-null-jar',
+    ).run()
+
+    await expect(storeStore().get('icloud-null-jar'))
+      .rejects.toMatchObject({ status: 500, message: 'iCloud 账号凭据已损坏。' })
   })
 })
 
 describe('iCloud alias counters', () => {
-  it('applies a create as a relative increment, not a snapshot total', async () => {
-    // Both callers read alias_total before the per-account gate, so an absolute
-    // write would drop one of two concurrent creates.
-    const store = new ICloudAccountStore(env, 'icloud-owner')
-    await store.insert(seededAccount('icloud-counters', { aliasTotal: 10, aliasActive: 9 }))
+  it('keeps a create increment that a concurrent cookie save would overwrite', async () => {
+    // Every saveCookies caller holds an account read before its network
+    // round-trip, so persisting their counters here reverts the create that
+    // landed meanwhile — including the one the call is reporting on.
+    const snapshot = seededAccount('icloud-counters', {
+      aliasTotal: 10, aliasActive: 9, cookies: { session: 'value' },
+    })
+    await storeStore().insert(snapshot)
+
+    await storeStore().addAliasSummary('icloud-counters', 1)
+    await storeStore().saveCookies(snapshot)
+
+    await expect(listed('icloud-counters')).resolves.toMatchObject({
+      aliasTotal: 11, aliasActive: 10,
+    })
+  })
+
+  it('applies two concurrent creates as two increments', async () => {
+    await storeStore().insert(seededAccount('icloud-counters-race', { aliasTotal: 10, aliasActive: 9 }))
 
     await Promise.all([
-      store.addAliasSummary('icloud-counters', 1),
-      store.addAliasSummary('icloud-counters', 1),
+      storeStore().addAliasSummary('icloud-counters-race', 1),
+      storeStore().addAliasSummary('icloud-counters-race', 1),
     ])
 
-    expect((await store.list()).find((item) => item.id === 'icloud-counters'))
-      .toMatchObject({ aliasTotal: 12, aliasActive: 11 })
+    await expect(listed('icloud-counters-race')).resolves.toMatchObject({
+      aliasTotal: 12, aliasActive: 11,
+    })
+  })
+})
+
+const STORE_SESSION = { id: STORE_USER } as SessionUser
+
+function aliasRequest(body: unknown): Request {
+  return new Request('https://mail.example.com/api/icloud/aliases', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  })
+}
+
+/** A fresh Response per call: request() retries, and a body reads only once. */
+function throttled(): Response {
+  return new Response('Too Many Requests', { status: 429 })
+}
+
+function serviceResponse(): Response {
+  return Response.json({
+    webservices: { premiummailsettings: { url: 'https://p71-maildomainws.icloud.com' } },
+    dsInfo: { dsid: '123', appleId: 'person@icloud.com' },
+  })
+}
+
+/** An Apple management state that is past its timeout but still refreshable. */
+function staleAppleState(): AppleAccountState {
+  return {
+    cookies: { session: 'cookie-value' }, scnt: 'scnt-old', sessionId: 'session-old',
+    apiKey: 'api-old', expiresAt: '', lastCheckedAt: '', userAgent: '',
+    host: 'appleid.apple.com', origin: 'https://account.apple.com',
+  }
+}
+
+/** Answer the two calls refresh() makes, and nothing else. */
+async function appleRefreshOnly(input: RequestInfo | URL): Promise<Response> {
+  const { pathname } = new URL(String(input))
+  if (pathname === '/account/manage/gs/ws/token') {
+    return new Response('{"timeOutInterval":15}', { headers: { scnt: 'scnt-fresh' } })
+  }
+  if (pathname === '/account/manage') {
+    return new Response('{"apiKey":"api-fresh"}', { headers: { scnt: 'scnt-manage' } })
+  }
+  return new Response('', { status: 404 })
+}
+
+/** Make every statement touching `needle` fail, as a D1 outage would. */
+function failingDb(db: D1Database, needle: string): D1Database {
+  return {
+    prepare(sql: string) {
+      if (!sql.includes(needle)) return db.prepare(sql)
+      const boom = async () => { throw new Error('D1_ERROR: database is unavailable') }
+      return { bind: () => ({ first: boom, run: boom, all: boom }) } as unknown as D1PreparedStatement
+    },
+  } as D1Database
+}
+
+function appleStatus(accountId: string): Promise<{ apple_account_status: string } | null> {
+  return env.DB.prepare('SELECT apple_account_status FROM icloud_accounts WHERE id = ?')
+    .bind(accountId).first<{ apple_account_status: string }>()
+}
+
+function webUsed(accountId: string): Promise<number | undefined> {
+  return readICloudAliasQuota(env.DB, STORE_USER, accountId)
+    .then((quotas) => quotas.find((item) => item.channel === 'icloud_web')?.used)
+}
+
+/**
+ * The alias handlers' failure paths, against a real D1. They reach the quota
+ * table and the store, which the unit suites stub away — every regression this
+ * feature has produced so far has lived in exactly that gap.
+ */
+describe('iCloud alias handler failure paths', () => {
+  afterEach(() => vi.restoreAllMocks())
+
+  it('saturates the window when Apple caps a preview', async () => {
+    // The batch runner previews before it creates, so a run's first cap lands
+    // here. Leaving the window untouched makes every later item repeat the trip.
+    await storeStore().insert(seededAccount('icloud-preview-cap', { cookies: { session: 'value' } }))
+    let validated = false
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+      if (validated) return throttled()
+      validated = true
+      return serviceResponse()
+    })
+
+    const response = await previewICloudAlias(
+      env, STORE_SESSION, aliasRequest({ accountId: 'icloud-preview-cap' }),
+    )
+
+    expect(response.status).toBe(429)
+    await expect(webUsed('icloud-preview-cap')).resolves.toBe(ICLOUD_ALIAS_HOURLY_LIMITS.icloud_web)
+  })
+
+  it('restores the status of a session that refreshed before the claim failed', async () => {
+    // An explicit channel bypasses the availability check, so this runs on a row
+    // still marked expired. refresh() rotates scnt upstream and the catch has to
+    // persist it — writing the rotated state back under the old 'expired' status
+    // would hide a session Apple has just accepted until it is imported again.
+    await storeStore().insert(seededAccount('icloud-refresh-claim', {
+      appleAccountState: staleAppleState(), appleAccountStatus: 'expired',
+    }))
+    vi.spyOn(globalThis, 'fetch').mockImplementation(appleRefreshOnly)
+    const broken = { ...env, DB: failingDb(env.DB, 'icloud_alias_create_limits') } as typeof env
+
+    const response = await createICloudAlias(broken, STORE_SESSION, aliasRequest({
+      accountId: 'icloud-refresh-claim', channel: 'apple_account',
+    }), '192.0.2.1')
+
+    expect(response.status).toBe(502)
+    await expect(appleStatus('icloud-refresh-claim'))
+      .resolves.toMatchObject({ apple_account_status: 'active' })
+  })
+
+  it('spends no slot when the service lookup is throttled on the draft path', async () => {
+    // A draft card carries email+previewId, so generateAlias() is skipped and
+    // reserveAlias() would resolve the service from inside the claim window.
+    // validate() throttles for reasons unrelated to the cap, and settleWebClaim
+    // can neither saturate nor refund that — the slot would simply burn.
+    await storeStore().insert(seededAccount('icloud-draft-throttle', { cookies: { session: 'value' } }))
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => throttled())
+
+    const response = await createICloudAlias(env, STORE_SESSION, aliasRequest({
+      accountId: 'icloud-draft-throttle',
+      email: 'candidate@icloud.com',
+      previewId: '11111111-2222-4333-8444-555555555555',
+    }), '192.0.2.1')
+
+    expect(response.status).toBe(502)
+    await expect(webUsed('icloud-draft-throttle')).resolves.toBe(0)
   })
 })
 

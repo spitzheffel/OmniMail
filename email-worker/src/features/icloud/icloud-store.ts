@@ -200,7 +200,12 @@ export class ICloudAccountStore {
     ])
     let cookies: Record<string, string> = {}
     try {
-      cookies = cookiesText ? JSON.parse(cookiesText) as Record<string, string> : {}
+      const parsed: unknown = cookiesText ? JSON.parse(cookiesText) : {}
+      // JSON.parse('null') succeeds, and every reader below calls Object.keys on
+      // the result. Without this the failure is a raw TypeError outside the
+      // catch, which reaches the client as an unexplained 502.
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('not an object')
+      cookies = parsed as Record<string, string>
     } catch {
       throw new ICloudStoreError(500, 'iCloud 账号凭据已损坏。')
     }
@@ -341,6 +346,13 @@ export class ICloudAccountStore {
     if (!result.meta.changes) throw new ICloudStoreError(404, 'iCloud 账号不存在。')
   }
 
+  /**
+   * Session state only. The counters are deliberately absent: every caller
+   * holds an account read before its network round-trip, so writing their
+   * snapshot here would revert an addAliasSummary a concurrent create landed in
+   * the meantime — including the create this very call is reporting on. Callers
+   * that just read Apple's authoritative list persist it via saveAliasSummary.
+   */
   async saveCookies(account: ICloudAccount): Promise<void> {
     const cipher = await encryptICloudCredential(
       this.env,
@@ -350,15 +362,13 @@ export class ICloudAccountStore {
     await this.env.DB.prepare(
       `UPDATE icloud_accounts SET
         cookies_cipher = ?, real_email = ?, icloud_email = ?, status = ?,
-        alias_total = ?, alias_active = ?, last_validated = ?, last_error = ?,
+        last_validated = ?, last_error = ?,
         updated_at = ? WHERE id = ? AND user_id = ?`,
     ).bind(
       cipher,
       account.realEmail,
       account.icloudEmail,
       account.status,
-      account.aliasTotal,
-      account.aliasActive,
       account.lastValidated,
       account.lastError,
       new Date().toISOString(),

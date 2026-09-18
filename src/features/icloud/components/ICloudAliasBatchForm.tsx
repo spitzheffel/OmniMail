@@ -10,6 +10,7 @@ import {
   batchSummary,
   buildAliasBatch,
   draftsToBatch,
+  hasUsableAliasChannel,
   planAliasBatch,
   remainingFor,
   type AliasBatchItem,
@@ -55,7 +56,14 @@ export function ICloudAliasBatchForm({ account, close, onCreated }: {
   const maximum = Math.max(0, remainingFor(channels, effective))
   const running = step === 'running'
 
-  const drafts = useICloudAliasDrafts(account.id, Math.max(1, maximum), useCards)
+  // A saturated window must not arm the preview: the card it would fill cannot
+  // be submitted, so the request can only come back as an error.
+  const drafts = useICloudAliasDrafts(
+    account.id,
+    Math.max(1, maximum),
+    useCards && maximum > 0,
+    () => applyRemaining('icloud_web', 0),
+  )
   const count = useCards ? drafts.drafts.length : Math.min(quantity, Math.max(1, maximum))
 
   useEffect(() => {
@@ -118,9 +126,13 @@ export function ICloudAliasBatchForm({ account, close, onCreated }: {
 
   const summaryText = running || step === 'complete'
     ? t('创建进度 {completed}/{total}', progress)
-    : maximum < 1
-      ? t('本小时额度已用完')
-      : t('创建项目 {count}/{max}', { count, max: maximum })
+    : !hasUsableAliasChannel(account)
+      // Not a budget problem: waiting for the window to roll over changes
+      // nothing, the session itself has to be imported again.
+      ? t('Apple Account 登录态已过期，请重新导入。')
+      : maximum < 1
+        ? t('本小时额度已用完')
+        : t('创建项目 {count}/{max}', { count, max: maximum })
 
   return (
     <form className="icloud-form icloud-alias-batch-form" onSubmit={(event) => void submit(event)}>

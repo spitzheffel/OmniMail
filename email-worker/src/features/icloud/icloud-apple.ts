@@ -335,7 +335,13 @@ export class ICloudClient {
     }
   }
 
-  private async ensureService(): Promise<void> {
+  /**
+   * Resolve the Hide My Email service URL, validating the cookie jar if needed.
+   * Public so callers can pay that cost *before* reserving an hourly slot: the
+   * validate() it may run throttles independently of the cap, and a 429 there
+   * is neither a cap nor a refundable refusal.
+   */
+  async ensureService(): Promise<void> {
     if (!this.serviceUrl) await this.validate()
   }
 

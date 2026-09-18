@@ -3,8 +3,10 @@ import {
   APPLE_ACCOUNT_ERROR_CODES,
   ICloudClient,
   ICLOUD_CREDENTIAL_ERROR_STATUS,
+  ICLOUD_WEB_ERROR_CODES,
   ICloudRemoteError,
 } from './icloud-apple'
+import { exhaustICloudAliasChannel } from './icloud-alias-quota'
 import { AppleAccountClient } from './icloud-account-client'
 import {
   deleteICloudAppleAccount,
@@ -142,12 +144,14 @@ async function refreshAliasSummary(
   account.cookies = client.cookies
   account.status = 'active'
   account.lastError = ''
+  let listed = false
   try {
     const aliases = await client.listAliases()
     account.cookies = client.cookies
     account.aliasTotal = aliases.length
     account.aliasActive = aliases.filter((alias) => alias.active).length
     account.lastValidated = new Date().toISOString()
+    listed = true
   } catch (error) {
     account.lastError = '隐藏邮箱操作已完成，但账号状态同步失败。'
     if (error instanceof ICloudRemoteError && error.status === ICLOUD_CREDENTIAL_ERROR_STATUS) account.status = 'error'
@@ -157,6 +161,10 @@ async function refreshAliasSummary(
     })
   }
   await store.saveCookies(account)
+  // Only a listing Apple actually answered may overwrite the counters. The
+  // catch above leaves the pre-request snapshot, which would undo an increment
+  // a concurrent create wrote while this request was in flight.
+  if (listed) await store.saveAliasSummary(account.id, account.aliasTotal, account.aliasActive)
 }
 
 export async function listICloudAccounts(env: Env, user: SessionUser): Promise<Response> {
@@ -291,8 +299,9 @@ export async function updateICloudCookies(
     const store = new ICloudAccountStore(env, user.id)
     const account = await store.get(id)
     account.cookies = parseICloudCookies(body.cookies)
-    await validateAccount(account)
+    const validationError = await validateAccount(account)
     await store.saveCookies(account)
+    if (!validationError) await store.saveAliasSummary(account.id, account.aliasTotal, account.aliasActive)
     await writeAudit(env, user.id, 'icloud.credentials.cookies', id, ip, iCloudAuditDetail(account))
     return Response.json({ account: publicICloudAccount(account) })
   } catch (error) {
@@ -378,6 +387,7 @@ export async function listICloudAliases(
       account.lastValidated = new Date().toISOString()
       account.lastError = ''
       await store.saveCookies(account)
+      await store.saveAliasSummary(account.id, account.aliasTotal, account.aliasActive)
       return Response.json({ aliases })
     } catch (error) {
       account.cookies = client.cookies
@@ -406,7 +416,20 @@ export async function previewICloudAlias(
       throw new ICloudStoreError(400, '该账号尚未配置 Cookie。')
     }
     const client = new ICloudClient(account.cookies, account.host)
-    const email = await client.generateAlias()
+    let email: string
+    try {
+      email = await client.generateAlias()
+    } catch (error) {
+      // The batch runner previews before it creates, so the first cap of a run
+      // lands here, not in createICloudAlias. Without saturating the window the
+      // quota keeps advertising slots and every remaining item repeats the trip.
+      if (error instanceof ICloudRemoteError && error.code === ICLOUD_WEB_ERROR_CODES.limit) {
+        await exhaustICloudAliasChannel(env.DB, user.id, accountId, 'icloud_web').catch(() => undefined)
+      }
+      account.cookies = client.cookies
+      await store.saveCookies(account).catch(() => undefined)
+      throw error
+    }
     account.cookies = client.cookies
     await store.saveCookies(account)
     return Response.json({ email, previewId: client.clientId })
