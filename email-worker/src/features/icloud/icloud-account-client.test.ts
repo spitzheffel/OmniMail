@@ -128,4 +128,28 @@ describe('Apple Account private email client', () => {
 
     await expect(client.listAliases()).resolves.toEqual([])
   })
+
+  it('reports zero aliases rather than borrowing a populated sibling array', async () => {
+    // hmeEmails is authoritative even when empty; picking forwardToEmails would
+    // publish the user's real forwarding address as a Hide My Email alias.
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(Response.json({
+      result: { hmeEmails: [], forwardToEmails: [{ emailAddress: 'real@me.com', id: 'f1' }] },
+    }))
+    const client = new AppleAccountClient(state())
+
+    await expect(client.listAliases()).resolves.toEqual([])
+  })
+
+  it('skips an empty sibling array to reach the alias list', async () => {
+    // [].every() is vacuously true; an empty list ahead of hmeEmails in key
+    // order must not be mistaken for "this account has zero aliases".
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(Response.json({
+      result: { forwardToEmails: [], hmeEmails: [{ emailAddress: 'Shop@icloud.com', id: 'a1' }] },
+    }))
+    const client = new AppleAccountClient(state())
+
+    await expect(client.listAliases()).resolves.toEqual([
+      expect.objectContaining({ email: 'shop@icloud.com', anonymousId: 'a1' }),
+    ])
+  })
 })

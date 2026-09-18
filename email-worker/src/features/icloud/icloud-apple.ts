@@ -42,6 +42,13 @@ export const APPLE_ACCOUNT_ERROR_CODES = {
 
 export const ICLOUD_WEB_ERROR_CODES = {
   limit: 'icloud_web_hme_limit',
+  /**
+   * A bare HTTP 429 from any iCloud endpoint. Only the Hide My Email create
+   * calls may read it as the hourly cap: `setup.icloud.com`, the listing and
+   * the delete endpoints throttle independently, and treating one of those as
+   * the cap would saturate the create window with no alias having been made.
+   */
+  throttled: 'icloud_web_throttled',
 } as const
 
 /**
@@ -274,6 +281,8 @@ export class ICloudClient {
               ? ICLOUD_CREDENTIAL_ERROR_MESSAGE
               : `iCloud 请求失败（HTTP ${response.status}）。`,
             response.status < 500 && response.status !== 429,
+            // Tagged, not classified: only hmeLimit() may read a 429 as the cap.
+            response.status === 429 ? ICLOUD_WEB_ERROR_CODES.throttled : '',
           )
           if (error.status === ICLOUD_CREDENTIAL_ERROR_STATUS) throw error
           if (!retryable || error.definitive) throw error
@@ -330,6 +339,24 @@ export class ICloudClient {
     if (!this.serviceUrl) await this.validate()
   }
 
+  /**
+   * Re-read a bare 429 from the two metered Hide My Email endpoints as the
+   * hourly cap. It lives here rather than in request() because every other
+   * endpoint this client serves throttles for unrelated reasons, and labelling
+   * those as the cap makes settleWebClaim saturate a window nothing spent.
+   */
+  private static hmeLimit(error: unknown): unknown {
+    if (error instanceof ICloudRemoteError && error.code === ICLOUD_WEB_ERROR_CODES.throttled) {
+      return new ICloudRemoteError(
+        429,
+        'iCloud 已达到当前隐藏邮箱创建上限，请稍后再试。',
+        true,
+        ICLOUD_WEB_ERROR_CODES.limit,
+      )
+    }
+    return error
+  }
+
   async listAliases(): Promise<ICloudAlias[]> {
     await this.ensureService()
     return parseICloudAliases(await this.request<unknown>('GET', `${this.serviceUrl}/v2/hme/list`))
@@ -341,7 +368,7 @@ export class ICloudClient {
       'POST',
       `${this.serviceUrl}/v1/hme/generate`,
       { langCode: 'en-us' },
-    )
+    ).catch((error: unknown) => { throw ICloudClient.hmeLimit(error) })
     if (!generated.success) throw iCloudHmeFailure(generated, 'iCloud 无法生成隐藏邮箱。')
     const email = generatedAliasAddress(generated.result)
     if (!email) throw new ICloudRemoteError(502, 'iCloud 响应中没有隐藏邮箱地址。')
@@ -362,7 +389,7 @@ export class ICloudClient {
       'POST',
       `${this.serviceUrl}/v1/hme/reserve`,
       { hme: normalizedEmail, label: finalLabel, note: 'Created by OmniMail' },
-    )
+    ).catch((error: unknown) => { throw ICloudClient.hmeLimit(error) })
     if (!reserved.success) throw iCloudHmeFailure(reserved, 'iCloud 无法保留隐藏邮箱。')
     return {
       email: generatedAliasAddress(reserved.result) || normalizedEmail,

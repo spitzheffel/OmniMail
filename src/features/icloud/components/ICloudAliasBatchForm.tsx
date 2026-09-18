@@ -37,7 +37,7 @@ export function ICloudAliasBatchForm({ account, close, onCreated }: {
   close: () => void
   onCreated: (aliases: CreatedAlias[]) => Promise<void>
 }) {
-  const { channels, estimated, applyRemaining } = useICloudAliasQuota(account)
+  const { channels, estimated, error: quotaError, applyRemaining } = useICloudAliasQuota(account)
   const [choice, setChoice] = useState<ICloudAliasChannelChoice>('auto')
   const [quantity, setQuantity] = useState(1)
   const [baseLabel, setBaseLabel] = useState('')
@@ -105,6 +105,11 @@ export function ICloudAliasBatchForm({ account, close, onCreated }: {
   }
 
   function restart() {
+    // Created cards already exist upstream and their previewId is spent; only
+    // the unfinished ones come back for another go.
+    if (useCards) {
+      drafts.prune(new Set(items.filter((item) => item.status !== 'success').map((item) => item.id)))
+    }
     setItems([])
     setProgress({ completed: 0, total: 0 })
     setRunError('')
@@ -151,7 +156,9 @@ export function ICloudAliasBatchForm({ account, close, onCreated }: {
               { remaining: quota.remaining, limit: quota.limit })}{' '}
           </span>
         ))}
-        {estimated && <span>{t('（额度为估算值，正在与 Apple 核对）')}</span>}
+        {estimated && <span>{quotaError
+          ? t('（额度为估算值，无法与 Apple 核对）')
+          : t('（额度为估算值，正在与 Apple 核对）')}</span>}
       </p>}
 
       {runError && <p className="inline-error" role="alert"><AlertCircle size={15} />{t(runError)}</p>}

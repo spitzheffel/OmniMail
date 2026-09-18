@@ -115,6 +115,32 @@ export function publicICloudAccount(account: ICloudAccount): PublicICloudAccount
   }
 }
 
+/**
+ * An empty jar is stored as '' rather than as the ciphertext of '{}', so the
+ * SQL-side `cookies_cipher <> ''` availability checks agree with the
+ * `Object.keys(cookies).length` check the create path applies.
+ */
+function cookieJarText(cookies: Record<string, string>): string {
+  return Object.keys(cookies).length ? JSON.stringify(cookies) : ''
+}
+
+/**
+ * Which alias channels an account can actually use. The create handler and the
+ * quota endpoint must agree on this or the client plans a batch onto a channel
+ * the server then refuses, so both read it from here.
+ *
+ * `expired` is not recoverable: it is written only when Apple rejects the
+ * stored scnt outright, and refresh() replays those same credentials.
+ */
+export function iCloudAliasChannels(
+  account: Pick<ICloudAccount, 'cookies' | 'appleAccountState' | 'appleAccountStatus'>,
+): { appleAccount: boolean; icloudWeb: boolean } {
+  return {
+    appleAccount: Boolean(account.appleAccountState) && account.appleAccountStatus !== 'expired',
+    icloudWeb: Object.keys(account.cookies).length > 0,
+  }
+}
+
 function publicICloudAccountRow(row: PublicICloudAccountRow): PublicICloudAccount {
   return {
     id: row.id,
@@ -178,6 +204,17 @@ export class ICloudAccountStore {
     } catch {
       throw new ICloudStoreError(500, 'iCloud 账号凭据已损坏。')
     }
+    // Rows written before empty jars were stored as '' hold the ciphertext of
+    // '{}', which is non-empty, so the SQL-side checks in list() keep offering
+    // a cookie channel the account does not have. Normalize on read; the
+    // compare-and-swap makes it a no-op once done and cannot clobber a jar
+    // another request saved in the meantime.
+    if (row.cookies_cipher && !Object.keys(cookies).length) {
+      await this.env.DB.prepare(
+        `UPDATE icloud_accounts SET cookies_cipher = ''
+         WHERE id = ? AND user_id = ? AND cookies_cipher = ?`,
+      ).bind(row.id, this.userId, row.cookies_cipher).run().catch(() => undefined)
+    }
     let appleAccountState = null
     if (appleStateText) {
       try {
@@ -223,34 +260,6 @@ export class ICloudAccountStore {
     return results.map(publicICloudAccountRow)
   }
 
-  /**
-   * Which credentials an account holds, derived in SQL. Cheaper and safer than
-   * get() for callers that only need availability, since no ciphertext is read
-   * and nothing is decrypted.
-   */
-  async credentialFlags(id: string): Promise<{
-    hasCookies: boolean
-    hasAppPassword: boolean
-    hasAppleAccount: boolean
-  }> {
-    const row = await this.env.DB.prepare(
-      `SELECT CASE WHEN cookies_cipher <> '' THEN 1 ELSE 0 END AS has_cookies,
-              CASE WHEN app_password_cipher <> '' THEN 1 ELSE 0 END AS has_app_password,
-              CASE WHEN apple_account_state_cipher <> '' THEN 1 ELSE 0 END AS has_apple_account
-       FROM icloud_accounts WHERE id = ? AND user_id = ?`,
-    ).bind(id, this.userId).first<{
-      has_cookies: number
-      has_app_password: number
-      has_apple_account: number
-    }>()
-    if (!row) throw new ICloudStoreError(404, 'iCloud 账号不存在。')
-    return {
-      hasCookies: Boolean(row.has_cookies),
-      hasAppPassword: Boolean(row.has_app_password),
-      hasAppleAccount: Boolean(row.has_apple_account),
-    }
-  }
-
   async get(id: string): Promise<ICloudAccount> {
     const row = await this.env.DB.prepare(
       'SELECT * FROM icloud_accounts WHERE id = ? AND user_id = ?',
@@ -272,7 +281,7 @@ export class ICloudAccountStore {
     const [cookiesCipher, passwordCipher, appleStateCipher] = await Promise.all([
       encryptICloudCredential(
         this.env,
-        JSON.stringify(account.cookies),
+        cookieJarText(account.cookies),
         this.context(account.id, 'cookies'),
       ),
       encryptICloudCredential(
@@ -335,7 +344,7 @@ export class ICloudAccountStore {
   async saveCookies(account: ICloudAccount): Promise<void> {
     const cipher = await encryptICloudCredential(
       this.env,
-      JSON.stringify(account.cookies),
+      cookieJarText(account.cookies),
       this.context(account.id, 'cookies'),
     )
     await this.env.DB.prepare(
@@ -382,20 +391,42 @@ export class ICloudAccountStore {
     const result = await this.env.DB.prepare(
       `UPDATE icloud_accounts SET apple_account_state_cipher = ?,
         apple_account_expires_at = ?, apple_account_status = ?, apple_account_error = ?,
-        alias_total = ?, alias_active = ?,
         updated_at = ? WHERE id = ? AND user_id = ?`,
     ).bind(
       cipher,
       account.appleAccountExpiresAt || '',
       account.appleAccountStatus || 'none',
       account.appleAccountError || '',
-      Math.max(0, account.aliasTotal || 0),
-      Math.max(0, account.aliasActive || 0),
       new Date().toISOString(),
       account.id,
       this.userId,
     ).run()
     if (!result.meta.changes) throw new ICloudStoreError(404, 'iCloud 账号不存在。')
+  }
+
+  /**
+   * Absolute counters, for callers that just read Apple's authoritative list.
+   * Session writers must not use this: they load the account, wait on Apple,
+   * then save, so their snapshot would regress a concurrent create.
+   */
+  async saveAliasSummary(id: string, total: number, active: number): Promise<void> {
+    await this.env.DB.prepare(
+      `UPDATE icloud_accounts SET alias_total = ?, alias_active = ?, updated_at = ?
+       WHERE id = ? AND user_id = ?`,
+    ).bind(Math.max(0, total), Math.max(0, active), new Date().toISOString(), id, this.userId).run()
+  }
+
+  /**
+   * Apply one create's delta in SQL. The caller's snapshot is read before the
+   * per-account gate, so writing `snapshot + 1` as an absolute value would drop
+   * a concurrent create's increment.
+   */
+  async addAliasSummary(id: string, activeDelta: number): Promise<void> {
+    await this.env.DB.prepare(
+      `UPDATE icloud_accounts SET alias_total = alias_total + 1,
+        alias_active = MAX(0, alias_active + ?), updated_at = ?
+       WHERE id = ? AND user_id = ?`,
+    ).bind(activeDelta, new Date().toISOString(), id, this.userId).run()
   }
 
   async clearAppleAccountState(id: string): Promise<void> {

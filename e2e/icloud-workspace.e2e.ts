@@ -331,6 +331,14 @@ test('finishes the rest of the batch after one alias fails', async ({ page }) =>
   await expect(dialog.locator('.icloud-alias-preview.is-success')).toHaveCount(3)
   await expect(dialog.locator('.icloud-alias-preview.is-error')).toHaveCount(1)
   expect(state.createdLabels).toEqual(['ONE', 'TWO', 'FOUR'])
+
+  // 继续创建 brings back only the card that did not go through, label and
+  // reserved address intact; the three created ones must not be replayed.
+  await dialog.getByRole('button', { name: '继续创建' }).click()
+  await expect(dialog.locator('.icloud-alias-preview')).toHaveCount(1)
+  await expect(dialog.getByRole('textbox', { name: '用途标签（可选）' })).toHaveValue('THREE')
+  await expect(dialog.getByText('github-2@icloud.com', { exact: true })).toBeVisible()
+  await expect(dialog.getByRole('button', { name: '创建 1 个' })).toBeEnabled()
 })
 
 test('creates a numbered batch through the Apple Account channel', async ({ page }) => {
@@ -343,6 +351,21 @@ test('creates a numbered batch through the Apple Account channel', async ({ page
   await expect(dialog.locator('.icloud-alias-preview')).toHaveCount(0)
   await expect(dialog.getByText('新接口本小时剩余 20/20')).toBeVisible()
   const quantity = dialog.getByRole('spinbutton', { name: '创建数量' })
+  // Clearing the field must not snap back to "1" and prefix the next digit.
+  await quantity.fill('3')
+  await quantity.press('End')
+  await quantity.press('Backspace')
+  await expect(quantity).toHaveValue('')
+  await quantity.press('5')
+  await expect(quantity).toHaveValue('5')
+  await expect(dialog.getByRole('button', { name: '创建 5 个' })).toBeVisible()
+  // Implicit submission from a blank field must resolve it back to the number
+  // the button promises rather than silently creating the previous quantity.
+  await quantity.press('End')
+  await quantity.press('Backspace')
+  await expect(quantity).toHaveValue('')
+  await quantity.press('Enter')
+  await expect(quantity).toHaveValue('5')
   await quantity.fill('3')
   await dialog.getByRole('textbox', { name: '基础标签（可选）' }).fill('GITHUB')
   await dialog.getByRole('button', { name: '创建 3 个' }).click()

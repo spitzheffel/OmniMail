@@ -94,5 +94,29 @@ export function useICloudAliasDrafts(accountId: string, maximum: number, enabled
     update(id, { label: label.slice(0, 80) })
   }, [update])
 
-  return { drafts, preview, add, remove, setLabel, busy: drafts.some((draft) => draft.loading) }
+  /**
+   * Keep only the listed drafts. After a batch the created cards already exist
+   * upstream and their previewId is spent, so bringing them back would replay
+   * them on the next submit. No survivors reseeds one fresh card.
+   */
+  const prune = useCallback((keep: Set<string>) => {
+    const survivors = draftsRef.current.filter((draft) => keep.has(draft.id))
+    for (const draft of draftsRef.current) {
+      if (!keep.has(draft.id)) versions.current.set(draft.id, (versions.current.get(draft.id) || 0) + 1)
+    }
+    // The mount effect previews firstDraftId whenever the channel is re-entered;
+    // leaving it pointing at a pruned card would fire a real Apple preview whose
+    // result no card can receive.
+    if (survivors.length) {
+      firstDraftId.current = survivors[0].id
+      setDrafts(survivors)
+      return
+    }
+    const fresh = newAliasDraft(crypto.randomUUID())
+    firstDraftId.current = fresh.id
+    setDrafts([fresh])
+    void preview(fresh.id)
+  }, [preview])
+
+  return { drafts, preview, add, remove, prune, setLabel, busy: drafts.some((draft) => draft.loading) }
 }

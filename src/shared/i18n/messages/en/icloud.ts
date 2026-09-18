@@ -233,6 +233,7 @@ export const enICloud: Record<string, string> = {
   '新接口本小时剩余 {remaining}/{limit}': 'New API: {remaining}/{limit} left this hour',
   '旧接口本小时剩余 {remaining}/{limit}': 'Legacy API: {remaining}/{limit} left this hour',
   '（额度为估算值，正在与 Apple 核对）': '(estimated budget, checking with Apple)',
+  '（额度为估算值，无法与 Apple 核对）': '(estimated budget, could not check with Apple)',
   '本小时额度已用完': 'This hour is used up',
   '本小时创建额度已用完': 'This hour\'s creation budget is used up',
   '本次没有创建任何隐藏邮箱。': 'No Hide My Email addresses were created this time.',

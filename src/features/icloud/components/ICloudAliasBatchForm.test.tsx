@@ -70,6 +70,18 @@ describe('ICloudAliasBatchForm', () => {
     expect(html).toContain('创建 1 个')
   })
 
+  it('drops an expired Apple session from the fallback channels', () => {
+    // The initial render runs on fallbackChannels; advertising 20 Apple slots
+    // for a session Apple has already rejected sizes the batch to 20 failures.
+    const html = render({
+      hasAppleAccount: true, appleAccountStatus: 'expired', hasCookies: true,
+    })
+
+    expect(html).not.toContain('新接口本小时剩余')
+    expect(html).toContain('旧接口本小时剩余 5/5')
+    expect(html).toContain('创建项目 1/5')
+  })
+
   it('derives the ceiling from the usable channels rather than a fixed cap', () => {
     expect(render({ hasAppleAccount: true, hasCookies: true })).toContain('创建项目 1/25')
     expect(render({ hasAppleAccount: true })).toContain('创建项目 1/20')

@@ -348,6 +348,7 @@ export async function listICloudAliases(
         account.aliasTotal = aliases.length
         account.aliasActive = aliases.filter((alias) => alias.active).length
         await store.saveAppleAccountState(account)
+        await store.saveAliasSummary(account.id, account.aliasTotal, account.aliasActive)
         return Response.json({ aliases })
       } catch (error) {
         if (error instanceof ICloudRemoteError && error.code === APPLE_ACCOUNT_ERROR_CODES.auth) {

@@ -127,16 +127,28 @@ export interface AppleAccountAlias {
   createdAt: string
 }
 
+function objectRows(value: unknown): Record<string, unknown>[] | undefined {
+  return Array.isArray(value)
+    && value.every((item) => item && typeof item === 'object' && !Array.isArray(item))
+    ? value as Record<string, unknown>[]
+    : undefined
+}
+
 /**
  * Locate the alias array in Apple's envelope. `found` distinguishes a genuinely
  * empty list from a payload shape we do not understand — callers must not treat
  * the latter as "this account has zero aliases".
  */
 function aliasArray(value: unknown): { rows: Record<string, unknown>[]; found: boolean } {
-  if (Array.isArray(value) && value.every((item) => item && typeof item === 'object' && !Array.isArray(item))) {
-    return { rows: value as Record<string, unknown>[], found: true }
-  }
+  const direct = objectRows(value)
+  if (direct) return { rows: direct, found: true }
   if (!value || typeof value !== 'object') return { rows: [], found: false }
+  // Apple's own key wins outright, empty or not. `[].every()` is vacuously
+  // true, so the generic search below cannot tell an empty alias list from a
+  // populated sibling such as forwardToEmails — and picking the sibling would
+  // publish the user's real forwarding address as a Hide My Email alias.
+  const named = objectRows((value as { hmeEmails?: unknown }).hmeEmails)
+  if (named) return { rows: named, found: true }
   for (const child of Object.values(value)) {
     const nested = aliasArray(child)
     if (nested.found) return nested

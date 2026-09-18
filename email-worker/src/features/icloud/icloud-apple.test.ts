@@ -178,6 +178,42 @@ describe('legacy Hide My Email failure classification', () => {
     expect((error as ICloudRemoteError).message).toBe('iCloud 无法生成隐藏邮箱。')
   })
 
+  it('classifies a bare HTTP 429 from the metered endpoints as the hourly cap', async () => {
+    // Without this the 429 became a non-definitive 502 with no code: the quota
+    // window was never saturated and the batch kept sending.
+    vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(validationResponse())
+      .mockResolvedValueOnce(new Response('Too Many Requests', { status: 429 }))
+
+    await expect(new ICloudClient({ session: 'value' }, 'icloud.com').createAlias('Shop'))
+      .rejects.toMatchObject({ status: 429, definitive: true, code: 'icloud_web_hme_limit' })
+  })
+
+  it('does not read a throttled setup service as the hourly cap', async () => {
+    // validate() hits setup.icloud.com, which throttles independently of the
+    // Hide My Email cap. Labelling it as the cap made settleWebClaim saturate
+    // the whole hour with no alias created.
+    vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('Too Many Requests', { status: 429 }))
+
+    const error = await new ICloudClient({ session: 'value' }, 'icloud.com')
+      .createAlias('Shop').catch((reason) => reason)
+
+    expect(error).toMatchObject({ status: 502, definitive: false })
+    expect((error as ICloudRemoteError).code).not.toBe('icloud_web_hme_limit')
+  })
+
+  it('does not read a throttled alias listing as the hourly cap', async () => {
+    vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(validationResponse())
+      .mockResolvedValue(new Response('Too Many Requests', { status: 429 }))
+
+    const error = await new ICloudClient({ session: 'value' }, 'icloud.com')
+      .listAliases().catch((reason) => reason)
+
+    expect((error as ICloudRemoteError).code).not.toBe('icloud_web_hme_limit')
+  })
+
   it('recognises the hourly cap from Apple prose', async () => {
     vi.spyOn(globalThis, 'fetch')
       .mockResolvedValueOnce(validationResponse())

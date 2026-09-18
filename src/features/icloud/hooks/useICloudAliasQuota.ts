@@ -9,7 +9,9 @@ import { ICLOUD_ALIAS_CHANNEL_ORDER, ICLOUD_ALIAS_FALLBACK_LIMITS } from '../mod
  */
 function fallbackChannels(account: ICloudAccount): ICloudAliasQuotaChannel[] {
   const available: Record<ICloudAliasChannel, boolean> = {
-    apple_account: Boolean(account.hasAppleAccount),
+    // Mirrors getICloudAliasQuota: an expired session needs a re-import, not a
+    // batch of creates that each fail the same way.
+    apple_account: Boolean(account.hasAppleAccount) && account.appleAccountStatus !== 'expired',
     icloud_web: Boolean(account.hasCookies),
   }
   return ICLOUD_ALIAS_CHANNEL_ORDER.map((channel) => ({

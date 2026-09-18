@@ -11,7 +11,9 @@ import {
   readICloudAliasQuota,
   releaseICloudAliasCreate,
 } from '../src/features/icloud/icloud-alias-quota'
-import { ICloudAccountStore } from '../src/features/icloud/icloud-store'
+import { encryptICloudCredential } from '../src/features/icloud/icloud-credentials'
+import { ICloudAccountStore, iCloudAliasChannels } from '../src/features/icloud/icloud-store'
+import type { ICloudAccount } from '../src/features/icloud/icloud-types'
 import type { Env as OmniMailEnv } from '../src/app/types'
 
 declare global {
@@ -209,20 +211,80 @@ describe('iCloud alias hourly quota', () => {
       ])
   })
 })
-describe('iCloud credential flags', () => {
-  it('derives channel availability without decrypting anything', async () => {
-    // The seeded row holds deliberately undecryptable ciphertext, so a helper
-    // that touched the credentials would throw here.
-    const store = new ICloudAccountStore(env, 'icloud-owner')
 
-    await expect(store.credentialFlags('icloud-account-1')).resolves.toEqual({
-      hasCookies: true, hasAppPassword: true, hasAppleAccount: false,
-    })
-    await expect(store.get('icloud-account-1')).rejects.toThrow()
+function seededAccount(id: string, overrides: Partial<ICloudAccount> = {}): ICloudAccount {
+  return {
+    id,
+    userId: 'icloud-owner',
+    name: 'Cookieless',
+    realEmail: '',
+    icloudEmail: 'owner@icloud.com',
+    cookies: {},
+    host: 'icloud.com',
+    appPassword: 'app-secret',
+    status: 'active',
+    aliasTotal: 0,
+    aliasActive: 0,
+    lastValidated: '',
+    lastError: '',
+    createdAt: new Date().toISOString(),
+    ...overrides,
+  } as ICloudAccount
+}
+
+describe('iCloud cookie jar storage', () => {
+  it('stores an empty jar as empty so SQL availability agrees with the create path', async () => {
+    // Encrypting '{}' yields real ciphertext, which made list()'s
+    // cookies_cipher <> '' advertised a cookie channel the create path refuses.
+    const store = new ICloudAccountStore(env, 'icloud-owner')
+    await store.insert(seededAccount('icloud-cookieless'))
+
+    const listed = (await store.list()).find((item) => item.id === 'icloud-cookieless')
+    expect(listed).toMatchObject({ hasCookies: false, hasAppPassword: true })
   })
 
-  it('refuses an account owned by another user', async () => {
-    await expect(new ICloudAccountStore(env, 'icloud-other').credentialFlags('icloud-account-1'))
-      .rejects.toMatchObject({ status: 404 })
+  it('normalizes a legacy row that stored the ciphertext of an empty jar', async () => {
+    const store = new ICloudAccountStore(env, 'icloud-owner')
+    await store.insert(seededAccount('icloud-legacy-jar'))
+    // Exactly what the pre-fix code wrote for a cookie-less account.
+    const legacy = await encryptICloudCredential(
+      env, '{}', 'icloud-owner:icloud-legacy-jar:cookies',
+    )
+    await env.DB.prepare('UPDATE icloud_accounts SET cookies_cipher = ? WHERE id = ?')
+      .bind(legacy, 'icloud-legacy-jar').run()
+    expect((await store.list()).find((item) => item.id === 'icloud-legacy-jar'))
+      .toMatchObject({ hasCookies: true })
+
+    await store.get('icloud-legacy-jar')
+
+    expect((await store.list()).find((item) => item.id === 'icloud-legacy-jar'))
+      .toMatchObject({ hasCookies: false })
+  })
+})
+
+describe('iCloud alias counters', () => {
+  it('applies a create as a relative increment, not a snapshot total', async () => {
+    // Both callers read alias_total before the per-account gate, so an absolute
+    // write would drop one of two concurrent creates.
+    const store = new ICloudAccountStore(env, 'icloud-owner')
+    await store.insert(seededAccount('icloud-counters', { aliasTotal: 10, aliasActive: 9 }))
+
+    await Promise.all([
+      store.addAliasSummary('icloud-counters', 1),
+      store.addAliasSummary('icloud-counters', 1),
+    ])
+
+    expect((await store.list()).find((item) => item.id === 'icloud-counters'))
+      .toMatchObject({ aliasTotal: 12, aliasActive: 11 })
+  })
+})
+
+describe('iCloud alias channel availability', () => {
+  it('treats a rejected Apple session as unusable, matching the create path', () => {
+    const base = { cookies: {}, appleAccountState: { scnt: 'x' } } as unknown as ICloudAccount
+    expect(iCloudAliasChannels({ ...base, appleAccountStatus: 'active' }).appleAccount).toBe(true)
+    expect(iCloudAliasChannels({ ...base, appleAccountStatus: 'expired' }).appleAccount).toBe(false)
+    expect(iCloudAliasChannels({ ...base, cookies: {} }).icloudWeb).toBe(false)
+    expect(iCloudAliasChannels({ ...base, cookies: { a: 'b' } }).icloudWeb).toBe(true)
   })
 })

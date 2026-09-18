@@ -14,10 +14,11 @@ import {
   releaseICloudAliasCreate,
   type ICloudAliasChannel,
 } from './icloud-alias-quota'
-import { AppleAccountClient } from './icloud-account-client'
+import { AppleAccountClient, type AppleAccountAlias } from './icloud-account-client'
 import {
   ICloudAccountStore,
   ICloudStoreError,
+  iCloudAliasChannels,
   parseICloudCookies,
   publicICloudAccount,
 } from './icloud-store'
@@ -227,9 +228,13 @@ export async function createICloudAlias(
     }
     const store = new ICloudAccountStore(env, user.id)
     const account = await store.get(accountId)
-    const hasCookies = Object.keys(account.cookies).length > 0
+    const usable = iCloudAliasChannels(account)
+    const hasCookies = usable.icloudWeb
+    // An explicit channel is honoured even when the session looks unusable, so
+    // the caller gets Apple's own error rather than a silent reroute; the
+    // inferred path follows the same availability the quota endpoint publishes.
     const useAppleAccount = requestedChannel === 'apple_account'
-      || (!requestedChannel && !email && Boolean(account.appleAccountState))
+      || (!requestedChannel && !email && usable.appleAccount)
     // An explicitly requested channel never spills over; the inferred path still
     // may, so the client can plan the split up front instead of discovering it
     // through failed Apple round-trips.
@@ -239,26 +244,47 @@ export async function createICloudAlias(
       if (!account.appleAccountState) throw new ICloudStoreError(400, '该账号尚未配置 Apple Account 管理态。')
       const client = new AppleAccountClient(account.appleAccountState)
       let claimed = false
+      let refreshed = false
       try {
-        // Refresh before claiming. A stale-session refresh never reaches
+        // Refresh, claim and create all run under the gate. The refresh rotates
+        // scnt like any other Apple call, so it must not overlap another
+        // request's; and claiming only after the previous create has settled
+        // lets a window that create just saturated reject queued requests
+        // locally instead of each one rediscovering Apple's limit. The refresh
+        // still precedes the claim: a stale-session refresh never reaches
         // /email/private/add, so its failures must not spend an hourly slot.
-        if (!client.isUsable()) await client.refresh()
-        const claim = await claimICloudAliasCreate(env.DB, user.id, accountId, 'apple_account')
-        if (!claim.allowed) {
-          if (!mayFallBack) throw new ICloudAliasQuotaError('apple_account', claim.retryAfter)
-        } else {
+        const outcome = await withAppleAccountCreateGate(accountId, async (): Promise<
+          { denied: number } | { denied?: undefined; created: AppleAccountAlias; remaining: number }
+        > => {
+          if (!client.isUsable()) { await client.refresh(); refreshed = true }
+          const claim = await claimICloudAliasCreate(env.DB, user.id, accountId, 'apple_account')
+          if (!claim.allowed) return { denied: claim.retryAfter }
           claimed = true
-          const created = await withAppleAccountCreateGate(accountId, () => client.createAlias(label))
+          return { created: await client.createAlias(label), remaining: claim.remaining }
+        })
+        if (outcome.denied !== undefined) {
+          // The refresh already rotated the session upstream; dropping it would
+          // leave a dead scnt in the store and the next call would mark the
+          // account expired.
+          if (refreshed) {
+            account.appleAccountState = client.state; account.appleAccountStatus = 'active'
+            account.appleAccountExpiresAt = client.state.expiresAt; account.appleAccountError = ''
+            await store.saveAppleAccountState(account).catch(() => undefined)
+          }
+          if (!mayFallBack) throw new ICloudAliasQuotaError('apple_account', outcome.denied)
+        } else {
+          const { created, remaining } = outcome
           account.appleAccountState = client.state; account.appleAccountStatus = 'active'
           account.appleAccountExpiresAt = client.state.expiresAt; account.appleAccountError = ''
           account.aliasTotal += 1; account.aliasActive += created.active ? 1 : 0
           await store.saveAppleAccountState(account)
+          await store.addAliasSummary(accountId, created.active ? 1 : 0)
           await writeAudit(env, user.id, 'icloud.alias.create', accountId, ip, auditDetail(account, {
             alias: created.email, label: created.label, channel: 'apple_account',
           }))
           return Response.json({
             alias: { email: created.email, label: created.label, createdAt: created.createdAt },
-            channel: 'apple_account', remaining: claim.remaining,
+            channel: 'apple_account', remaining,
           }, { status: 201 })
         }
       } catch (error) {
@@ -274,6 +300,13 @@ export async function createICloudAlias(
           if (error.code === APPLE_ACCOUNT_ERROR_CODES.auth) account.appleAccountStatus = 'expired'
           account.appleAccountError = error.message.slice(0, 300)
           await store.saveAppleAccountState(account).catch(() => undefined)
+        } else if (refreshed) {
+          // A D1 or runtime failure after the refresh would otherwise drop a
+          // scnt Apple has already rotated, and the next create would read as
+          // expired. Quota rejections keep their own persistence above.
+          account.appleAccountState = client.state
+          account.appleAccountExpiresAt = client.state.expiresAt
+          await store.saveAppleAccountState(account).catch(() => undefined)
         }
         if (!mayFallBack || !appleAccountFailure(error)) throw error
       }
@@ -283,7 +316,20 @@ export async function createICloudAlias(
     // /v1/hme/generate only asks Apple for a candidate address; /v1/hme/reserve
     // is what spends the budget. Claiming between the two keeps credential and
     // entitlement failures from burning a slot they never reached.
-    const reserveEmail = email || await client.generateAlias()
+    let reserveEmail = email
+    if (!reserveEmail) {
+      try {
+        reserveEmail = await client.generateAlias()
+      } catch (error) {
+        // Apple may already phrase the hourly cap at generate time. No claim
+        // exists yet to settle, so saturate the window directly; otherwise the
+        // next dialog would still advertise the slots and rediscover the limit.
+        if (error instanceof ICloudRemoteError && error.code === ICLOUD_WEB_ERROR_CODES.limit) {
+          await exhaustICloudAliasChannel(env.DB, user.id, accountId, 'icloud_web').catch(() => undefined)
+        }
+        throw error
+      }
+    }
     const webClaim = await claimICloudAliasCreate(env.DB, user.id, accountId, 'icloud_web')
     if (!webClaim.allowed) throw new ICloudAliasQuotaError('icloud_web', webClaim.retryAfter)
     let alias: { email: string; label: string; createdAt: string }
@@ -336,13 +382,13 @@ export async function getICloudAliasQuota(
   try {
     const accountId = new URL(request.url).searchParams.get('accountId') || ''
     if (!accountId) throw new ICloudStoreError(400, '缺少 accountId。')
-    // Channel availability is derived in SQL: this endpoint has no business
-    // decrypting cookies, the app password and the Apple session just to read
-    // two booleans.
-    const flags = await new ICloudAccountStore(env, user.id).credentialFlags(accountId)
+    // Shared with createICloudAlias's inferred path so the client never plans
+    // onto a channel the create handler would refuse.
+    const account = await new ICloudAccountStore(env, user.id).get(accountId)
+    const usable = iCloudAliasChannels(account)
     const available: Record<ICloudAliasChannel, boolean> = {
-      apple_account: flags.hasAppleAccount,
-      icloud_web: flags.hasCookies,
+      apple_account: usable.appleAccount,
+      icloud_web: usable.icloudWeb,
     }
     const quotas = await readICloudAliasQuota(env.DB, user.id, accountId)
     const channels = quotas.map((quota) => ({
