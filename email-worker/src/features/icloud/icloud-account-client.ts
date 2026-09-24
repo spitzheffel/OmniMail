@@ -131,8 +131,12 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
 }
 
+/**
+ * An empty array is no evidence here: `[].every()` is vacuously true, so an
+ * `errors: []` ahead of the real list would otherwise read as "zero aliases".
+ */
 function objectRows(value: unknown): Record<string, unknown>[] | undefined {
-  return Array.isArray(value) && value.every(isPlainObject)
+  return Array.isArray(value) && value.length > 0 && value.every(isPlainObject)
     ? value as Record<string, unknown>[]
     : undefined
 }
@@ -143,27 +147,35 @@ function objectRows(value: unknown): Record<string, unknown>[] | undefined {
  * rows I can read". Demanding readable rows here would hand a ragged or empty
  * hmeEmails back to the positional search, which then picks whichever array
  * comes first in key order — typically forwardToEmails, the user's own address.
+ *
+ * Every hmeEmails in the payload is collected, so neither key order nor depth
+ * picks the answer: an empty one elsewhere (a summary, a previous page) must not
+ * hide the populated list, wherever either sits. If every one is empty, the
+ * account has none. Populated lists that disagree are reported as unrecognised
+ * rather than guessed between, and the caller then persists nothing.
  */
-function namedRows(value: unknown): Record<string, unknown>[] | undefined {
-  // Breadth-first, so the shallowest hmeEmails wins. Depth-first made the answer
-  // depend on key order: an empty hmeEmails nested under an earlier sibling hid
-  // the real list one level up. Arrays are walked as well as objects, since
-  // Apple wraps its payload differently per region; only isPlainObject decides
-  // what counts as a row.
-  let level: unknown[] = [value]
-  while (level.length) {
-    const next: unknown[] = []
-    for (const node of level) {
-      if (!node || typeof node !== 'object') continue
-      const own = (node as { hmeEmails?: unknown }).hmeEmails
-      if (Array.isArray(own)) return own.filter(isPlainObject)
-      // A loop rather than push(...values): spreading a large alias list into
-      // arguments can exceed the engine's argument limit.
-      for (const child of Object.values(node)) next.push(child)
+function namedRows(value: unknown): { rows: Record<string, unknown>[]; found: boolean } | undefined {
+  const lists: Record<string, unknown>[][] = []
+  // Arrays are walked as well as objects, since Apple wraps its payload
+  // differently per region; only isPlainObject decides what counts as a row.
+  // A queue rather than recursion, and push in a loop rather than
+  // push(...values): spreading a large alias list can exceed the argument limit.
+  const pending: unknown[] = [value]
+  for (let index = 0; index < pending.length; index += 1) {
+    const node = pending[index]
+    if (!node || typeof node !== 'object') continue
+    for (const [key, child] of Object.entries(node)) {
+      if (key === 'hmeEmails' && Array.isArray(child)) lists.push(child.filter(isPlainObject))
+      else pending.push(child)
     }
-    level = next
   }
-  return undefined
+  if (!lists.length) return undefined
+  const [first, ...others] = lists.filter((rows) => rows.length)
+  if (!first) return { rows: [], found: true }
+  const expected = JSON.stringify(first)
+  return others.every((rows) => JSON.stringify(rows) === expected)
+    ? { rows: first, found: true }
+    : { rows: [], found: false }
 }
 
 /** Positional fallback for envelopes that do not name the list at all. */
@@ -186,15 +198,13 @@ function firstObjectArray(value: unknown): { rows: Record<string, unknown>[]; fo
  * empty list from a payload shape we do not understand — callers must not treat
  * the latter as "this account has zero aliases".
  *
- * hmeEmails wins outright wherever it sits, empty or not: `[].every()` is
- * vacuously true, so the positional search cannot tell an empty alias list from
- * a populated sibling such as forwardToEmails, and picking the sibling would
- * publish the user's real forwarding address as a Hide My Email alias.
+ * hmeEmails beats the positional search wherever it sits, empty or not: the
+ * positional search cannot tell an empty alias list from a populated sibling
+ * such as forwardToEmails, and picking the sibling would publish the user's
+ * real forwarding address as a Hide My Email alias.
  */
 function aliasArray(value: unknown): { rows: Record<string, unknown>[]; found: boolean } {
-  const named = namedRows(value)
-  if (named) return { rows: named, found: true }
-  return firstObjectArray(value)
+  return namedRows(value) ?? firstObjectArray(value)
 }
 
 function aliasFromValue(value: Record<string, unknown>): AppleAccountAlias | null {

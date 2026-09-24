@@ -216,7 +216,7 @@ describe('Apple Account private email client', () => {
     ])
   })
 
-  it('prefers the shallowest hmeEmails over one nested in an earlier array', async () => {
+  it('prefers a populated hmeEmails over an empty one nested in an earlier array', async () => {
     // Depth-first, the empty list inside data[0] was reached before result's
     // real one purely because 'data' sorts first — and zero was persisted.
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(Response.json({
@@ -230,10 +230,64 @@ describe('Apple Account private email client', () => {
     ])
   })
 
-  it('prefers the shallowest hmeEmails over one nested in an earlier object', async () => {
+  it('prefers a populated hmeEmails over an empty one nested in an earlier object', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(Response.json({
       meta: { previous: { hmeEmails: [] } },
       result: { hmeEmails: [{ emailAddress: 'Shop@icloud.com', id: 'a1' }] },
+    }))
+    const client = new AppleAccountClient(state())
+
+    await expect(client.listAliases()).resolves.toEqual([
+      expect.objectContaining({ email: 'shop@icloud.com', anonymousId: 'a1' }),
+    ])
+  })
+
+  it('prefers a populated hmeEmails that sits deeper than an empty one', async () => {
+    // The mirror of the case above. Shallowest-first returned meta's empty list
+    // here, because the array around the real one costs it a level.
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(Response.json({
+      data: [{ hmeEmails: [{ emailAddress: 'Shop@icloud.com', id: 'a1' }] }],
+      meta: { hmeEmails: [] },
+    }))
+    const client = new AppleAccountClient(state())
+
+    await expect(client.listAliases()).resolves.toEqual([
+      expect.objectContaining({ email: 'shop@icloud.com', anonymousId: 'a1' }),
+    ])
+  })
+
+  it('prefers a populated hmeEmails over an empty one at the same depth', async () => {
+    // With both at one level, only key order could separate them — and meta
+    // comes first.
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(Response.json({
+      meta: { hmeEmails: [] },
+      result: { hmeEmails: [{ emailAddress: 'Shop@icloud.com', id: 'a1' }] },
+    }))
+    const client = new AppleAccountClient(state())
+
+    await expect(client.listAliases()).resolves.toEqual([
+      expect.objectContaining({ email: 'shop@icloud.com', anonymousId: 'a1' }),
+    ])
+  })
+
+  it('reports populated hmeEmails lists that disagree instead of picking one', async () => {
+    // Nothing in the payload says which list is current, and either guess
+    // persists a count. The caller treats found:false as "listing unavailable".
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(Response.json({
+      meta: { previous: { hmeEmails: [{ emailAddress: 'Old@icloud.com', id: 'a0' }] } },
+      result: { hmeEmails: [{ emailAddress: 'Shop@icloud.com', id: 'a1' }] },
+    }))
+    const client = new AppleAccountClient(state())
+
+    await expect(client.listAliases()).rejects.toMatchObject({ code: APPLE_ACCOUNT_ERROR_CODES.api })
+  })
+
+  it('does not take an empty array for the unnamed alias list', async () => {
+    // No hmeEmails, so the positional search answers; errors: [] passes the
+    // all-objects test vacuously and used to be reported as zero aliases.
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(Response.json({
+      errors: [],
+      privateEmails: [{ emailAddress: 'Shop@icloud.com', id: 'a1' }],
     }))
     const client = new AppleAccountClient(state())
 

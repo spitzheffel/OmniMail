@@ -5,16 +5,22 @@ import {
   ICLOUD_ALIAS_HOURLY_LIMITS,
   readICloudAliasQuota,
 } from '../src/features/icloud/icloud-alias-quota'
-import { createICloudAlias, previewICloudAlias } from '../src/features/icloud/icloud-api'
+import { refreshICloudAliasSummary } from '../src/features/icloud/icloud-alias-summary'
+import {
+  createICloudAlias,
+  listICloudAliases,
+  previewICloudAlias,
+} from '../src/features/icloud/icloud-api'
+import type { ICloudClient } from '../src/features/icloud/icloud-apple'
 import { encryptICloudCredential } from '../src/features/icloud/icloud-credentials'
 import { ICloudAccountStore, iCloudAliasChannels } from '../src/features/icloud/icloud-store'
-import type { AppleAccountState, ICloudAccount } from '../src/features/icloud/icloud-types'
+import type { AppleAccountState, ICloudAccount, ICloudAlias } from '../src/features/icloud/icloud-types'
 import type { SessionUser } from '../src/app/types'
 
 /*
  * The account store and the alias handlers' failure paths, against a real D1.
- * Every row here belongs to a user of its own, so nothing can leak into the
- * account-API suite in icloud.integration.ts, which counts its owner's rows.
+ * Each integration file runs on a fresh database of its own; the 'icloud-store'
+ * user exists because every account row needs an owner.
  */
 beforeAll(async () => {
   await applyD1Migrations(env.DB, env.TEST_MIGRATIONS)
@@ -78,6 +84,33 @@ function racingDb(db: D1Database, needle: string, before: () => Promise<unknown>
   } as D1Database
 }
 
+/** A store whose first statement matching `needle` lets `before` land first. */
+function racedStore(needle: string, before: () => Promise<unknown>): ICloudAccountStore {
+  return new ICloudAccountStore(
+    { ...env, DB: racingDb(env.DB, needle, before) } as typeof env,
+    STORE_USER,
+  )
+}
+
+/** What a listing reported, in the shape saveAliasSummary takes. */
+function listing(id: string, total: number, active: number) {
+  return { id, aliasTotal: total, aliasActive: active }
+}
+
+/**
+ * A cookie client that only lists: `total` aliases, the first `active` of them
+ * active. `during` runs while the listing is in flight.
+ */
+function listingClient(total: number, active: number, during?: () => Promise<unknown>): ICloudClient {
+  const aliases: ICloudAlias[] = Array.from({ length: total }, (_, index) => ({
+    email: `alias-${index}@icloud.com`, anonymousId: `a${index}`, label: '', active: index < active,
+  }))
+  return {
+    cookies: {},
+    listAliases: async () => { await during?.(); return aliases },
+  } as unknown as ICloudClient
+}
+
 describe('iCloud cookie jar storage', () => {
   it('stores an empty jar as empty so SQL availability agrees with the create path', async () => {
     // Encrypting '{}' yields real ciphertext, which made list()'s
@@ -112,13 +145,9 @@ describe('iCloud cookie jar storage', () => {
       'icloud-legacy-race',
     ).run()
 
-    const raced = new ICloudAccountStore(
-      { ...env, DB: racingDb(env.DB, "cookies_cipher = ''", () => storeStore().saveCookies(
-        seededAccount('icloud-legacy-race', { cookies: { session: 'live' } }),
-      )) } as typeof env,
-      STORE_USER,
-    )
-    await raced.get('icloud-legacy-race')
+    await racedStore("cookies_cipher = ''", () => storeStore().saveCookies(
+      seededAccount('icloud-legacy-race', { cookies: { session: 'live' } }),
+    )).get('icloud-legacy-race')
 
     await expect(storeStore().get('icloud-legacy-race'))
       .resolves.toMatchObject({ cookies: { session: 'live' } })
@@ -161,15 +190,8 @@ describe('iCloud alias counters', () => {
     const store = storeStore()
     await store.insert(seededAccount('icloud-summary-race', { aliasTotal: 10, aliasActive: 10 }))
 
-    const raced = new ICloudAccountStore(
-      { ...env, DB: racingDb(env.DB, 'alias_total = ?', () => (
-        store.addAliasSummary('icloud-summary-race', 1)
-      )) } as typeof env,
-      STORE_USER,
-    )
-    await raced.saveAliasSummary(
-      'icloud-summary-race', { total: 10, active: 10 }, { total: 10, active: 10 },
-    )
+    await racedStore('alias_total = ?', () => store.addAliasSummary('icloud-summary-race', 1))
+      .saveAliasSummary(listing('icloud-summary-race', 9, 9), { total: 10, active: 10 })
 
     await expect(listed('icloud-summary-race')).resolves.toMatchObject({
       aliasTotal: 11, aliasActive: 11,
@@ -178,40 +200,47 @@ describe('iCloud alias counters', () => {
 
   it('yields to a deactivate that landed after the listing was taken', async () => {
     // Deactivate moves alias_active and leaves the total alone, so a guard on
-    // the total alone let an older listing put back an alias already switched
-    // off: the row ended at 10/10 after the deactivate had written 10/9.
+    // the total alone let an older listing (here one that also caught an alias
+    // made on another device) overwrite the 10/9 the deactivate had written.
     const store = storeStore()
     await store.insert(seededAccount('icloud-summary-active', { aliasTotal: 10, aliasActive: 10 }))
 
-    const raced = new ICloudAccountStore(
-      { ...env, DB: racingDb(env.DB, 'alias_total = ?', () => (
-        store.saveAliasSummary(
-          'icloud-summary-active', { total: 10, active: 9 }, { total: 10, active: 10 },
-        )
-      )) } as typeof env,
-      STORE_USER,
-    )
-    await raced.saveAliasSummary(
-      'icloud-summary-active', { total: 10, active: 10 }, { total: 10, active: 10 },
-    )
+    await racedStore('alias_total = ?', () => store.saveAliasSummary(
+      listing('icloud-summary-active', 10, 9), { total: 10, active: 10 },
+    )).saveAliasSummary(listing('icloud-summary-active', 11, 11), { total: 10, active: 10 })
 
     await expect(listed('icloud-summary-active')).resolves.toMatchObject({
       aliasTotal: 10, aliasActive: 9,
     })
   })
 
+  it('yields to a delete that moved only the total', async () => {
+    // Deleting an inactive alias leaves alias_active alone, so the total needs a
+    // guard of its own: without it an older listing (here one that also caught
+    // a deactivate) puts the deleted alias back.
+    const store = storeStore()
+    await store.insert(seededAccount('icloud-summary-total', { aliasTotal: 10, aliasActive: 9 }))
+
+    await racedStore('alias_total = ?', () => store.saveAliasSummary(
+      listing('icloud-summary-total', 9, 9), { total: 10, active: 9 },
+    )).saveAliasSummary(listing('icloud-summary-total', 10, 8), { total: 10, active: 9 })
+
+    await expect(listed('icloud-summary-total')).resolves.toMatchObject({
+      aliasTotal: 9, aliasActive: 9,
+    })
+  })
+
   it('still applies a listing that found one alias fewer', async () => {
     // The guard must not block the legitimate case it exists alongside: a
-    // delete lowers the count and nothing else touched the row.
+    // delete lowers the count and nothing else touched the row. One alias is
+    // already off, so each column is matched against a value of its own.
     const store = storeStore()
-    await store.insert(seededAccount('icloud-summary-delete', { aliasTotal: 10, aliasActive: 10 }))
+    await store.insert(seededAccount('icloud-summary-delete', { aliasTotal: 10, aliasActive: 9 }))
 
-    await store.saveAliasSummary(
-      'icloud-summary-delete', { total: 9, active: 9 }, { total: 10, active: 10 },
-    )
+    await store.saveAliasSummary(listing('icloud-summary-delete', 9, 8), { total: 10, active: 9 })
 
     await expect(listed('icloud-summary-delete')).resolves.toMatchObject({
-      aliasTotal: 9, aliasActive: 9,
+      aliasTotal: 9, aliasActive: 8,
     })
   })
 
@@ -225,6 +254,41 @@ describe('iCloud alias counters', () => {
 
     await expect(listed('icloud-counters-race')).resolves.toMatchObject({
       aliasTotal: 12, aliasActive: 11,
+    })
+  })
+})
+
+describe('iCloud alias summary refresh', () => {
+  it('applies a listing that already includes a change landed before it', async () => {
+    // This request read 10/10, then another request's deactivate wrote 10/9
+    // while this one was still talking to Apple, and the listing (10/8) already
+    // counts it. Measured against the request's own read, the newer listing was
+    // thrown away and the row kept 10/9.
+    const store = storeStore()
+    await store.insert(seededAccount('icloud-refresh-baseline', { aliasTotal: 10, aliasActive: 10 }))
+    const account = await store.get('icloud-refresh-baseline')
+    await store.saveAliasSummary(listing('icloud-refresh-baseline', 10, 9), { total: 10, active: 10 })
+
+    await refreshICloudAliasSummary(store, account, listingClient(10, 8))
+
+    await expect(listed('icloud-refresh-baseline')).resolves.toMatchObject({
+      aliasTotal: 10, aliasActive: 8,
+    })
+  })
+
+  it('still yields to a change that lands while the listing is in flight', async () => {
+    // The listing (9/9) was taken before the create finished, so the create's
+    // increment is the newer fact.
+    const store = storeStore()
+    await store.insert(seededAccount('icloud-refresh-race', { aliasTotal: 10, aliasActive: 10 }))
+    const account = await store.get('icloud-refresh-race')
+
+    await refreshICloudAliasSummary(store, account, listingClient(9, 9, () => (
+      store.addAliasSummary('icloud-refresh-race', 1)
+    )))
+
+    await expect(listed('icloud-refresh-race')).resolves.toMatchObject({
+      aliasTotal: 11, aliasActive: 11,
     })
   })
 })
@@ -247,6 +311,11 @@ function serviceResponse(): Response {
     webservices: { premiummailsettings: { url: 'https://p71-maildomainws.icloud.com' } },
     dsInfo: { dsid: '123', appleId: 'person@icloud.com' },
   })
+}
+
+/** Apple accepting a preview: /v1/hme/generate with a candidate address. */
+function generated(): Response {
+  return Response.json({ success: true, result: { hme: 'fresh@icloud.com' } })
 }
 
 /** An Apple management state that is past its timeout but still refreshable. */
@@ -303,12 +372,9 @@ describe('iCloud alias handler failure paths', () => {
     // The batch runner previews before it creates, so a run's first cap lands
     // here. Leaving the window untouched makes every later item repeat the trip.
     await storeStore().insert(seededAccount('icloud-preview-cap', { cookies: { session: 'value' } }))
-    let validated = false
-    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
-      if (validated) return throttled()
-      validated = true
-      return serviceResponse()
-    })
+    vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(serviceResponse())
+      .mockImplementation(async () => throttled())
 
     const response = await previewICloudAlias(
       env, STORE_SESSION, aliasRequest({ accountId: 'icloud-preview-cap' }),
@@ -344,12 +410,9 @@ describe('iCloud alias handler failure paths', () => {
     await storeStore().insert(seededAccount('icloud-preview-recovered', {
       cookies: { session: 'value' }, status: 'error', lastError: 'old failure',
     }))
-    let validated = false
-    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
-      if (validated) return Response.json({ success: true, result: { hme: 'fresh@icloud.com' } })
-      validated = true
-      return serviceResponse()
-    })
+    vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(serviceResponse())
+      .mockImplementation(async () => generated())
 
     const response = await previewICloudAlias(
       env, STORE_SESSION, aliasRequest({ accountId: 'icloud-preview-recovered' }),
@@ -358,6 +421,49 @@ describe('iCloud alias handler failure paths', () => {
     expect(response.status).toBe(200)
     await expect(listed('icloud-preview-recovered'))
       .resolves.toMatchObject({ status: 'active', lastError: '' })
+  })
+
+  it('leaves a listing failure alone when Apple accepts a preview', async () => {
+    // Only the credential failure the preview's own catch records is unmarked.
+    // This note was left by an alias operation whose follow-up listing failed,
+    // and a freshly generated address says nothing about whether the counts
+    // caught up since.
+    await storeStore().insert(seededAccount('icloud-preview-stale-count', {
+      cookies: { session: 'value' }, lastError: '隐藏邮箱操作已完成，但账号状态同步失败。',
+    }))
+    vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(serviceResponse())
+      .mockImplementation(async () => generated())
+
+    const response = await previewICloudAlias(
+      env, STORE_SESSION, aliasRequest({ accountId: 'icloud-preview-stale-count' }),
+    )
+
+    expect(response.status).toBe(200)
+    await expect(listed('icloud-preview-stale-count')).resolves.toMatchObject({
+      status: 'active', lastError: '隐藏邮箱操作已完成，但账号状态同步失败。',
+    })
+  })
+
+  it('keeps the rotated Apple session when the listing after a refresh fails', async () => {
+    // A stale session is refreshed before listing, and where the list endpoint
+    // is missing (the 404 here) the handler still answers with an empty list. It
+    // used to drop the scnt the refresh had rotated, so the next create replayed
+    // a dead one and marked the account expired.
+    await storeStore().insert(seededAccount('icloud-list-refresh', {
+      appleAccountState: staleAppleState(),
+    }))
+    vi.spyOn(globalThis, 'fetch').mockImplementation(appleRefreshOnly)
+
+    const response = await listICloudAliases(env, STORE_SESSION, new Request(
+      'https://mail.example.com/api/icloud/aliases?accountId=icloud-list-refresh',
+    ))
+
+    expect(response.status).toBe(200)
+    await expect(response.json()).resolves.toEqual({ aliases: [] })
+    await expect(storeStore().get('icloud-list-refresh')).resolves.toMatchObject({
+      appleAccountState: { scnt: 'scnt-manage', apiKey: 'api-fresh' },
+    })
   })
 
   it('marks the account when Apple rejects the jar at preview time', async () => {

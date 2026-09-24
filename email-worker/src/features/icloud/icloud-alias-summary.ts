@@ -3,36 +3,38 @@ import {
   ICloudRemoteError,
   type ICloudClient,
 } from './icloud-apple'
-import { iCloudAliasCounts, type ICloudAccountStore } from './icloud-store'
+import type { ICloudAccountStore, ICloudAliasCounts } from './icloud-store'
 import type { ICloudAccount } from './icloud-types'
 
 /**
  * Persist the cookie session after an alias operation, plus the counts Apple
  * reported — but only when Apple actually answered the listing. A failed
- * listing leaves the pre-request snapshot on `account`, and writing that back
- * would undo an increment a concurrent create landed meanwhile.
+ * listing leaves the request-start snapshot on `account`, and writing that back
+ * would regress a change another request landed since.
  *
- * The absolute write is guarded by the counts this request started from, so even
- * a successful listing yields to a create or deactivate that landed after it was
- * taken: that change is the newer fact, and the next listing reconciles the rest.
+ * The absolute write is measured against the row as it stood just before the
+ * listing, not as this request first read it. The operation ahead of it took
+ * several round trips, and a change another request landed in that time is
+ * already part of what Apple reports; only one that lands while the listing is
+ * in flight is newer, and the write yields to it until the next listing.
  */
 export async function refreshICloudAliasSummary(
   store: ICloudAccountStore,
   account: ICloudAccount,
   client: ICloudClient,
 ): Promise<void> {
-  const known = iCloudAliasCounts(account)
   account.cookies = client.cookies
   account.status = 'active'
   account.lastError = ''
-  let listed = false
+  let known: ICloudAliasCounts | undefined
   try {
+    const before = await store.aliasCounts(account.id)
     const aliases = await client.listAliases()
     account.cookies = client.cookies
     account.aliasTotal = aliases.length
     account.aliasActive = aliases.filter((alias) => alias.active).length
     account.lastValidated = new Date().toISOString()
-    listed = true
+    known = before
   } catch (error) {
     account.lastError = '隐藏邮箱操作已完成，但账号状态同步失败。'
     if (error instanceof ICloudRemoteError && error.status === ICLOUD_CREDENTIAL_ERROR_STATUS) {
@@ -43,8 +45,9 @@ export async function refreshICloudAliasSummary(
       message: error instanceof Error ? error.message : String(error),
     })
   }
-  // Disjoint columns, so neither write has to queue behind the other.
+  // Only updated_at overlaps and nothing reads it, so the counts need not wait
+  // for the cookie encryption and its round trip.
   const writes = [store.saveCookies(account)]
-  if (listed) writes.push(store.saveAliasSummary(account.id, iCloudAliasCounts(account), known))
+  if (known) writes.push(store.saveAliasSummary(account, known))
   await Promise.all(writes)
 }

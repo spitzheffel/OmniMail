@@ -273,9 +273,7 @@ export async function updateICloudCookies(
     account.cookies = parseICloudCookies(body.cookies)
     const validationError = await validateAccount(account)
     const writes = [store.saveCookies(account)]
-    if (!validationError) {
-      writes.push(store.saveAliasSummary(account.id, iCloudAliasCounts(account), known))
-    }
+    if (!validationError) writes.push(store.saveAliasSummary(account, known))
     await Promise.all(writes)
     await writeAudit(env, user.id, 'icloud.credentials.cookies', id, ip, iCloudAuditDetail(account))
     return Response.json({ account: publicICloudAccount(account) })
@@ -324,6 +322,9 @@ export async function listICloudAliases(
     const known = iCloudAliasCounts(account)
     if (!Object.keys(account.cookies).length && account.appleAccountState) {
       const appleClient = new AppleAccountClient(account.appleAccountState)
+      // listAliases() refreshes a stale session first, rotating scnt upstream
+      // whether or not the listing after it succeeds.
+      const refreshes = !appleClient.isUsable()
       try {
         const aliases = await appleClient.listAliases()
         account.appleAccountState = appleClient.state
@@ -334,13 +335,20 @@ export async function listICloudAliases(
         account.aliasActive = aliases.filter((alias) => alias.active).length
         await Promise.all([
           store.saveAppleAccountState(account),
-          store.saveAliasSummary(account.id, iCloudAliasCounts(account), known),
+          store.saveAliasSummary(account, known),
         ])
         return Response.json({ aliases })
       } catch (error) {
-        if (error instanceof ICloudRemoteError && error.code === APPLE_ACCOUNT_ERROR_CODES.auth) {
-          account.appleAccountStatus = 'expired'
-          account.appleAccountError = error.message.slice(0, 300)
+        if (error instanceof ICloudRemoteError
+          && (refreshes || error.code === APPLE_ACCOUNT_ERROR_CODES.auth)) {
+          // Same rule as createICloudAlias: dropping the rotated state leaves a
+          // dead scnt in the store, and the next create marks the account expired.
+          account.appleAccountState = appleClient.state
+          account.appleAccountExpiresAt = appleClient.state.expiresAt
+          if (error.code === APPLE_ACCOUNT_ERROR_CODES.auth) {
+            account.appleAccountStatus = 'expired'
+            account.appleAccountError = error.message.slice(0, 300)
+          }
           await store.saveAppleAccountState(account).catch(() => undefined)
         }
         if (error instanceof ICloudRemoteError && error.code === APPLE_ACCOUNT_ERROR_CODES.api) {
@@ -366,7 +374,7 @@ export async function listICloudAliases(
       account.lastError = ''
       await Promise.all([
         store.saveCookies(account),
-        store.saveAliasSummary(account.id, iCloudAliasCounts(account), known),
+        store.saveAliasSummary(account, known),
       ])
       return Response.json({ aliases })
     } catch (error) {
@@ -418,11 +426,13 @@ export async function previewICloudAlias(
       throw error
     }
     account.cookies = client.cookies
-    // Apple just accepted this jar, so a failure recorded against it earlier is
-    // stale. The catch above marks the account; this is the matching unmark,
-    // without which it would stay sorted last until an alias listing ran.
-    account.status = 'active'
-    account.lastError = ''
+    // Apple just accepted this jar, so a credential failure the catch above
+    // recorded is stale; unmark it or the account stays sorted last. A note under
+    // an active status (a failed post-operation listing) isn't about the jar.
+    if (account.status === 'error') {
+      account.status = 'active'
+      account.lastError = ''
+    }
     await store.saveCookies(account)
     return Response.json({ email, previewId: client.clientId })
   } catch (error) {

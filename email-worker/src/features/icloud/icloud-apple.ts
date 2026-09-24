@@ -63,8 +63,12 @@ function iCloudHmeLimitReason(reason: string): boolean {
     || reason.includes('创建上限')
 }
 
+function iCloudHmeReason(data: Record<string, unknown>): string {
+  return nonEmpty(data.error, data.reason, data.errorMessage, data.message).slice(0, 300)
+}
+
 function iCloudHmeFailure(data: Record<string, unknown>, fallback: string): ICloudRemoteError {
-  const reason = nonEmpty(data.error, data.reason, data.errorMessage, data.message).slice(0, 300)
+  const reason = iCloudHmeReason(data)
   if (iCloudHmeLimitReason(reason)) {
     return new ICloudRemoteError(
       429,
@@ -365,7 +369,17 @@ export class ICloudClient {
 
   async listAliases(): Promise<ICloudAlias[]> {
     await this.ensureService()
-    return parseICloudAliases(await this.request<unknown>('GET', `${this.serviceUrl}/v2/hme/list`))
+    const data = await this.request<Record<string, unknown> | null>(
+      'GET',
+      `${this.serviceUrl}/v2/hme/list`,
+    )
+    // Same envelope as generate and reserve: a refusal is a 200 with success:
+    // false. Parsed, it holds no aliases, and every caller persists a listing as
+    // the account's real count.
+    if (data?.success === false) {
+      throw new ICloudRemoteError(502, 'iCloud 无法读取隐藏邮箱列表。', true, '', iCloudHmeReason(data))
+    }
+    return parseICloudAliases(data)
   }
 
   async generateAlias(): Promise<string> {

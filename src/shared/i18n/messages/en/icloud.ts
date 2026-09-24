@@ -196,6 +196,7 @@ export const enICloud: Record<string, string> = {
   'iCloud 账号已添加': 'iCloud account added',
   '隐藏邮箱地址无效。': 'The Hide My Email address is invalid.',
   'iCloud 无法生成隐藏邮箱。': 'iCloud could not generate a Hide My Email address.',
+  'iCloud 无法读取隐藏邮箱列表。': 'iCloud could not read the Hide My Email list.',
   '连接 iCloud 超时。': 'The iCloud connection timed out.',
   '连接 iCloud 失败。': 'Could not connect to iCloud.',
   'iCloud Cookie 已失效，或账号未开通 iCloud+、没有 Hide My Email 权限。':

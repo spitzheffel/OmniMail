@@ -115,7 +115,7 @@ export function publicICloudAccount(account: ICloudAccount): PublicICloudAccount
   }
 }
 
-/** The pair of counters a listing reports, or the pair a request started from. */
+/** The pair of counters a listing is measured against. */
 export interface ICloudAliasCounts {
   total: number
   active: number
@@ -427,27 +427,47 @@ export class ICloudAccountStore {
   }
 
   /**
+   * The counters as they stand now. A caller whose own read happened several
+   * round trips before its listing measures the listing against this instead:
+   * a change that landed in between is already part of what Apple reports.
+   */
+  async aliasCounts(id: string): Promise<ICloudAliasCounts> {
+    const row = await this.env.DB.prepare(
+      'SELECT alias_total, alias_active FROM icloud_accounts WHERE id = ? AND user_id = ?',
+    ).bind(id, this.userId).first<{ alias_total: number; alias_active: number }>()
+    if (!row) throw new ICloudStoreError(404, 'iCloud 账号不存在。')
+    return { total: Number(row.alias_total), active: Number(row.alias_active) }
+  }
+
+  /**
    * Absolute counters, for callers that just read Apple's authoritative list.
    * Session writers must not use this: they load the account, wait on Apple,
    * then save, so their snapshot would regress a concurrent create.
    *
-   * `known` is what the row said when this request read the account. A listing
+   * `known` is what the row said just before the listing was taken. A listing
    * is only authoritative for the state it observed, so if either counter has
    * moved since — a create's increment, another request's deactivate — that
    * change is the newer fact and the write is skipped; the next listing
    * reconciles. Both columns are compared because deactivate and reactivate
-   * move alias_active without touching the total. Required rather than
-   * optional so a new caller has to decide what its listing is relative to.
+   * move alias_active without touching the total. The comparison is by value,
+   * so a change undone before this write (deactivate, then reactivate) goes
+   * unseen: the counters are a best-effort summary, not a ledger. Required
+   * rather than optional so a new caller has to decide what its listing is
+   * relative to.
    */
   async saveAliasSummary(
-    id: string, counts: ICloudAliasCounts, known: ICloudAliasCounts,
+    account: Pick<ICloudAccount, 'id' | 'aliasTotal' | 'aliasActive'>,
+    known: ICloudAliasCounts,
   ): Promise<void> {
+    // Nothing to reconcile: had the row moved, the guard would skip the write,
+    // and if it has not, the write would store the numbers it already holds.
+    if (account.aliasTotal === known.total && account.aliasActive === known.active) return
     await this.env.DB.prepare(
       `UPDATE icloud_accounts SET alias_total = ?, alias_active = ?, updated_at = ?
        WHERE id = ? AND user_id = ? AND alias_total = ? AND alias_active = ?`,
     ).bind(
-      Math.max(0, counts.total), Math.max(0, counts.active), new Date().toISOString(),
-      id, this.userId, known.total, known.active,
+      Math.max(0, account.aliasTotal), Math.max(0, account.aliasActive), new Date().toISOString(),
+      account.id, this.userId, known.total, known.active,
     ).run()
   }
 

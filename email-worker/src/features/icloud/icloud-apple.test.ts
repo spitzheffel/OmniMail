@@ -227,6 +227,17 @@ describe('legacy Hide My Email failure classification', () => {
       .rejects.toMatchObject({ status: 502, definitive: false, code: 'icloud_web_throttled' })
   })
 
+  it('reports a refused alias listing instead of an empty one', async () => {
+    // Parsed as a listing, this envelope holds no aliases, and every caller
+    // persists a listing as the account's real count: 0/0 over a good one.
+    vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(validationResponse())
+      .mockResolvedValueOnce(Response.json({ success: false, error: 'Service unavailable in region' }))
+
+    await expect(new ICloudClient({ session: 'value' }, 'icloud.com').listAliases())
+      .rejects.toMatchObject({ status: 502, detail: 'Service unavailable in region' })
+  })
+
   it('exposes the service lookup so it can run before a slot is claimed', async () => {
     // The draft-card path supplies email+previewId, so generateAlias() is
     // skipped and reserveAlias() would be the first call to resolve the
