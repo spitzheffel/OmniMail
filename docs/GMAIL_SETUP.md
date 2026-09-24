@@ -24,8 +24,9 @@ Google Cloud Project 或 OAuth Client；用户打开正文后会同步标记 Gma
 4. 在 OmniMail 左侧打开 **Gmail 邮箱 → 管理 Gmail 账号**。
 5. 填写账号名称、完整邮箱地址和 Google 显示的 16 位应用密码。
 
-应用密码可按原显示格式粘贴空格。请勿填写 Google 账号主密码。某些 Workspace、
-Advanced Protection 或仅使用安全密钥进行两步验证的账号可能没有应用密码入口。
+应用密码可按原显示格式粘贴空格，普通空格、不间断空格等分隔符都会被自动忽略。请勿填写
+Google 账号主密码。某些 Workspace、Advanced Protection 或仅使用安全密钥进行两步验证的账号
+可能没有应用密码入口。
 
 ## 同步与已读行为
 

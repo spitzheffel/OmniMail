@@ -19,6 +19,7 @@ function config(binding: object = { binding: 'DB' }) {
   return { rawConfig, config: rawConfig, configPath: join(tmpdir(), 'wrangler.jsonc') }
 }
 const environment = {}
+const databaseListPath = (name: string, page = 1) => `/accounts/${accountId}/d1/database?name=${encodeURIComponent(name)}&per_page=100&page=${page}`
 
 describe('部署数据库目标解析', () => {
   it('两种库名并存时只使用现有 DB ID，完全不按推导库名查询', async () => {
@@ -44,14 +45,84 @@ describe('部署数据库目标解析', () => {
     })).rejects.toThrow('database_id 与线上 DB 绑定不一致')
   })
 
-  it.each([{}, { bindings: [] }, { bindings: [{ name: 'DB', type: 'kv_namespace', id: boundId }] }, { bindings: [{ name: 'DB', type: 'd1', id: 'invalid' }] }])(
+  it.each([{}, { bindings: [{ name: 'DB', type: 'kv_namespace', id: boundId }] }, { bindings: [{ name: 'DB', type: 'd1', id: 'invalid' }] },
+    { bindings: [...settings.bindings, ...settings.bindings] }])(
     '已有 Worker 绑定无效不能当成首次部署：%j', async (remote) => {
       await expect(resolveDeploymentTarget({}, { environment, read: async () => config(), get: async () => remote })).rejects.toThrow()
     },
   )
 
+  it.each([{ bindings: [] }, { bindings: [{ name: 'SETUP_TOKEN', type: 'secret_text' }, { name: 'SUPER_ADMIN_EMAIL', type: 'plain_text' }] }])(
+    '新账号中预创建的 Worker 可以自动创建 DB，兼容已配置变量：%j', async ({ bindings }) => {
+      const get = vi.fn().mockResolvedValueOnce({ bindings }).mockResolvedValue([])
+      const target = await resolveDeploymentTarget({}, { environment, read: async () => config(), get })
+      expect(target).toMatchObject({ workerExists: true, databaseId: undefined })
+      expect(get).toHaveBeenCalledWith(databaseListPath('omni-mail-db'))
+      expect(get).toHaveBeenLastCalledWith(databaseListPath('omnimail-db'))
+    },
+  )
+
+  it.each(['omni-mail-db', 'omnimail-db'])(
+    'Worker 缺少 DB 而账号已有 %s 时不擅自创建或复用', async (name) => {
+      const get = vi.fn(async (path: string) => path.endsWith('/settings') ? { bindings: [] }
+        : new URL(path, 'https://api.example').searchParams.get('name') === name ? [{ name, uuid: boundId }] : [])
+      await expect(resolveDeploymentTarget({}, { environment, read: async () => config(), get }))
+        .rejects.toThrow('请恢复 DB 绑定')
+    },
+  )
+
+  it.each(['omni-mail', 'omnimail'])('其他服务 D1 不阻止 %s 首次建库，也不会被选为迁移目标', async (workerName) => {
+    const get = vi.fn(async (path: string) => {
+      if (path.endsWith(`/workers/scripts/${workerName}/settings`)) return { bindings: [] }
+      const name = new URL(path, 'https://api.example').searchParams.get('name')
+      expect(['omni-mail-db', 'omnimail-db']).toContain(name)
+      return [{ name: 'ggesim-frontend-nodes', uuid: wrongId }, { name: `${name}-archive`, uuid: wrongId }]
+    })
+    const target = await resolveDeploymentTarget({}, { read: async () => config(), get, environment: { WRANGLER_CI_OVERRIDE_NAME: workerName } })
+    expect(target).toMatchObject({ workerExists: true, workerName, databaseId: undefined })
+    expect(get).toHaveBeenCalledTimes(3)
+  })
+
+  it.each([null, {}, { result: [] }, [{ name: 'omni-mail-db', uuid: 'invalid' }], [{ uuid: boundId }]])('数据库列表无效时不能确认目标库不存在：%j', async (databases) => {
+    const get = vi.fn().mockResolvedValueOnce({ bindings: [] }).mockResolvedValueOnce(databases)
+    await expect(resolveDeploymentTarget({}, { environment, read: async () => config(), get }))
+      .rejects.toThrow('列表响应无效')
+  })
+
+  it('查询 D1 名称权限失败时保留错误，不能当作目标库不存在', async () => {
+    const get = vi.fn().mockResolvedValueOnce({ bindings: [] }).mockRejectedValueOnce(new Error('HTTP 403'))
+    await expect(resolveDeploymentTarget({}, { environment, read: async () => config(), get })).rejects.toThrow('HTTP 403')
+  })
+
+  it('名称过滤结果分页时继续检查，不能遗漏后续页面中的同名库', async () => {
+    const get = vi.fn().mockResolvedValueOnce({ bindings: [] })
+      .mockResolvedValueOnce(Array.from({ length: 100 }, (_, i) => ({ name: `omni-mail-db-copy-${i}`, uuid: wrongId })))
+      .mockResolvedValueOnce([{ name: 'omni-mail-db', uuid: boundId }])
+    await expect(resolveDeploymentTarget({}, { environment, read: async () => config(), get })).rejects.toThrow('已存在 omni-mail-db')
+    expect(get).toHaveBeenLastCalledWith(databaseListPath('omni-mail-db', 2))
+  })
+
+  it('名称查询返回重复全名时拒绝选择数据库', async () => {
+    const get = vi.fn().mockResolvedValueOnce({ bindings: [] })
+      .mockResolvedValueOnce([{ name: 'omni-mail-db', uuid: boundId }, { name: 'omni-mail-db', uuid: wrongId }])
+    await expect(resolveDeploymentTarget({}, { environment, read: async () => config(), get })).rejects.toThrow('不唯一')
+  })
+
+  it('Worker 尚未绑定 DB 时允许显式指定并校验已有数据库', async () => {
+    const get = vi.fn().mockResolvedValueOnce({ bindings: [] }).mockResolvedValueOnce({ uuid: boundId })
+    const target = await resolveDeploymentTarget({}, { environment, read: async () => config({ binding: 'DB', database_id: boundId }), get })
+    expect(target).toMatchObject({ workerExists: true, databaseId: boundId })
+    expect(get).toHaveBeenLastCalledWith(`/accounts/${accountId}/d1/database/${boundId}`)
+  })
+
+  it('显式配置数据库 ID 时拒绝查询响应返回其他数据库', async () => {
+    const get = vi.fn().mockResolvedValueOnce({ bindings: [] }).mockResolvedValueOnce({ uuid: wrongId })
+    await expect(resolveDeploymentTarget({}, { environment, read: async () => config({ binding: 'DB', database_id: boundId }), get }))
+      .rejects.toThrow('ID 与配置不一致')
+  })
+
   it('Worker 确认不存在且未指定数据库，才返回首次创建状态', async () => {
-    expect(await resolveDeploymentTarget({}, { environment, read: async () => config(), get: async () => null }))
+    expect(await resolveDeploymentTarget({}, { environment, read: async () => config(), get: async (path: string) => path.endsWith('/settings') ? null : [] }))
       .toMatchObject({ workerExists: false, databaseId: undefined })
   })
 
@@ -59,9 +130,9 @@ describe('部署数据库目标解析', () => {
     const directory = mkdtempSync(join(tmpdir(), 'omnimail-new-db-test-')); directories.push(directory)
     const loaded = config()
     loaded.configPath = join(directory, 'wrangler.jsonc')
-    const get = vi.fn().mockResolvedValueOnce(null).mockResolvedValueOnce({ uuid: wrongId })
+    const get = vi.fn().mockResolvedValueOnce(null).mockResolvedValueOnce([{ name: 'omni-mail-db', uuid: wrongId }])
     await expect(resolveDeploymentTarget({}, { environment, read: async () => loaded, get })).rejects.toThrow('已存在 omni-mail-db')
-    const target = await resolveDeploymentTarget({}, { environment, read: async () => loaded, get: async () => null })
+    const target = await resolveDeploymentTarget({}, { environment, read: async () => loaded, get: async (path: string) => path.endsWith('/settings') ? null : [] })
     const file = writeDeploymentTarget(target)
     try {
       expect(JSON.parse(readFileSync(file.path, 'utf8')).d1_databases).toEqual([{ binding: 'DB', database_name: 'omni-mail-db' }])
@@ -69,9 +140,9 @@ describe('部署数据库目标解析', () => {
   })
 
   it('首次部署显式指定已有数据库时先验证 ID', async () => {
-    const get = vi.fn().mockResolvedValueOnce(null).mockResolvedValueOnce({ uuid: boundId })
+    const get = vi.fn().mockResolvedValueOnce(null).mockResolvedValueOnce([{ name: 'existing-db', uuid: boundId }])
     const target = await resolveDeploymentTarget({}, { environment, read: async () => config({ binding: 'DB', database_name: 'existing-db' }), get })
-    expect(get).toHaveBeenLastCalledWith(`/accounts/${accountId}/d1/database/existing-db`)
+    expect(get).toHaveBeenLastCalledWith(databaseListPath('existing-db'))
     expect(target.databaseId).toBe(boundId)
   })
 

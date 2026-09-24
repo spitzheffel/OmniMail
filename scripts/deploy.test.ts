@@ -27,11 +27,11 @@ describe('部署入口', () => {
     expect(deps.dispose).toHaveBeenCalledOnce()
   })
 
-  it('首次部署后重新解析实际 ID，等待绑定可用再初始化', async () => {
+  it.each([false, true])('首次部署后重新解析实际 ID，等待绑定可用再初始化（Worker 已存在：%s）', async (workerExists) => {
     const events: string[] = []
     const deps = dependencies()
-    deps.resolveTarget.mockResolvedValueOnce({ ...target, workerExists: false, databaseId: undefined })
-      .mockResolvedValueOnce({ ...target, workerExists: false, databaseId: undefined })
+    deps.resolveTarget.mockResolvedValueOnce({ ...target, workerExists, databaseId: undefined })
+      .mockResolvedValueOnce({ ...target, workerExists, databaseId: undefined })
       .mockResolvedValue(target)
     await deploy([], { ...deps,
       migrate: async () => { events.push('migrate') }, run: async () => { events.push('deploy') },
@@ -39,6 +39,18 @@ describe('部署入口', () => {
     expect(events).toEqual(['deploy', 'migrate'])
     expect(deps.resolveTarget).toHaveBeenCalledTimes(3)
     expect(deps.dispose).toHaveBeenCalledTimes(2)
+  })
+
+  it('资源已创建但绑定传播延迟时只重查绑定，不重复发布或创建数据库', async () => {
+    const deps = dependencies()
+    deps.resolveTarget.mockResolvedValueOnce({ ...target, databaseId: undefined })
+      .mockRejectedValueOnce(new Error('已有 Worker 缺少有效的 DB 绑定，但账户中已存在 omni-mail-db。'))
+      .mockResolvedValue(target)
+    const run = vi.fn(), migrate = vi.fn()
+    await deploy([], { ...deps, run, migrate })
+    expect(run).toHaveBeenCalledOnce()
+    expect(migrate).toHaveBeenCalledOnce()
+    expect(deps.resolveTarget).toHaveBeenCalledTimes(3)
   })
 
   it.each(['Authentication error', 'SQLITE_ERROR', "Couldn't find an auto-provisioned D1 DB named 'omni-mail-db' for binding 'DB'"])(

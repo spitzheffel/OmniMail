@@ -44,8 +44,12 @@ describe('workspace routes', () => {
       view: 'microsoft',
     })
     expect(workspaceRoute('/naver-mail', 'user')).toMatchObject({
-      kind: 'folder',
-      folder: 'inbox',
+      kind: 'admin',
+      view: 'naver-mail',
+    })
+    expect(workspaceRoute('/yandex-mail', 'user')).toMatchObject({
+      kind: 'admin',
+      view: 'yandex-mail',
     })
   })
 

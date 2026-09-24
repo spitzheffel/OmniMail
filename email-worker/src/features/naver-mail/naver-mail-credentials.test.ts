@@ -38,8 +38,10 @@ describe('NAVER Mail credential encryption', () => {
     expect(naverMailCredentialsReady(env)).toBe(true)
   })
 
-  it('requires the IMAP feature switch to be explicitly enabled', () => {
-    expect(naverMailImapEnabled(env)).toBe(false)
-    expect(naverMailImapEnabled({ ...env, NAVER_MAIL_IMAP_ENABLED: 'true' })).toBe(true)
+  it('密钥有效即可启用，不再依赖旧环境开关', () => {
+    const legacyEnv = { ...env, NAVER_MAIL_IMAP_ENABLED: 'false' }
+    expect(naverMailImapEnabled(env)).toBe(true)
+    expect(naverMailImapEnabled(legacyEnv)).toBe(true)
+    expect(naverMailImapEnabled({} as Env)).toBe(false)
   })
 })

@@ -1,5 +1,6 @@
-import { attachmentDisposition, safeJsonArray, validEmail } from '../../shared/http/api-helpers'
+import { attachmentDisposition, safeJsonArray } from '../../shared/http/api-helpers'
 import { writeAudit } from '../../shared/audit/audit'
+import { gmailAppPasswordField, gmailEmailField, gmailNameField } from './gmail-fields'
 import { gmailImapEnabled } from './gmail-credentials'
 import type { GmailImapClient } from './gmail-imap'
 import { ImapConnectionError } from '../../platform/imap/imap-errors'
@@ -82,30 +83,6 @@ async function jsonBody(request: Request): Promise<Record<string, unknown>> {
   } catch {
     throw new GmailStoreError(400, '请求体必须是 JSON 对象。')
   }
-}
-
-export function gmailNameField(value: unknown): string {
-  const name = typeof value === 'string' ? value.trim() : ''
-  if (!name || name.length > 60 || /[\r\n\0]/.test(name)) {
-    throw new GmailStoreError(400, '账号名称需要为 1–60 个字符。')
-  }
-  return name
-}
-
-export function gmailEmailField(value: unknown): string {
-  const email = typeof value === 'string' ? value.trim().toLowerCase() : ''
-  if (!validEmail(email) || /[\r\n\0]/.test(email)) {
-    throw new GmailStoreError(400, '请填写完整的 Gmail 或 Google Workspace 邮箱地址。')
-  }
-  return email
-}
-
-export function gmailAppPasswordField(value: unknown): string {
-  const password = typeof value === 'string' ? value.replaceAll(' ', '') : ''
-  if (!/^[\x21-\x7E]{16}$/.test(password) || /[\r\n\0]/.test(password)) {
-    throw new GmailStoreError(400, '请填写 Google 生成的 16 位应用专用密码，而不是账号主密码。')
-  }
-  return password
 }
 
 function maskedEmail(email: string): string {

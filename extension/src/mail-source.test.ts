@@ -54,8 +54,33 @@ describe('Float indexed mail source adapters', () => {
     })).toEqual({
       id: 'message-1', accountId: 'gmail-1', accountName: 'Personal Gmail',
       accountEmail: 'owner@gmail.com', senderName: 'Sender', senderAddress: 'sender@example.net',
-      recipients: ['owner@gmail.com'], subject: 'Code', preview: '123456', date: 123,
+      recipients: ['owner@gmail.com'], subject: 'Code', preview: '123456', date: 123000,
       isRead: false, hasAttachments: true,
     })
+  })
+
+  it('converts second-based timestamps to milliseconds while preserving millisecond timestamps and ISO strings', () => {
+    const baseInput = {
+      id: 'message-1',
+      account: { id: 'gmail-1', name: 'Personal Gmail', email: 'owner@gmail.com' },
+      senderName: 'Sender',
+      senderAddress: 'sender@example.net',
+      recipients: ['owner@gmail.com'],
+      subject: 'Test',
+      preview: 'Preview',
+      isRead: true,
+      hasAttachments: false,
+    }
+
+    expect(normalizeIndexedMessage({ ...baseInput, date: 1737520000 }).date)
+      .toBe(1737520000000)
+    expect(normalizeIndexedMessage({ ...baseInput, date: 1737520000000 }).date)
+      .toBe(1737520000000)
+    expect(normalizeIndexedMessage({ ...baseInput, date: '2025-01-22T08:00:00.000Z' }).date)
+      .toBe(Date.parse('2025-01-22T08:00:00.000Z'))
+    expect(normalizeIndexedMessage({ ...baseInput, date: '1737520000' }).date)
+      .toBe(1737520000000)
+    expect(normalizeIndexedMessage({ ...baseInput, date: 'invalid-date' }).date)
+      .toBe(0)
   })
 })

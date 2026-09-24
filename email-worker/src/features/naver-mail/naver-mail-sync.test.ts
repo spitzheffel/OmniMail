@@ -35,7 +35,7 @@ describe('NAVER Mail synchronization policy', () => {
     ])
   })
 
-  it('schedules due accounts at a 15-minute interval', async () => {
+  it('只配置统一密钥即可按 15 分钟间隔调度到期账号', async () => {
     const statements: Array<{ sql: string; bindings: unknown[] }> = []
     const jobs: MailQueueJob[] = []
     const db = {
@@ -52,8 +52,7 @@ describe('NAVER Mail synchronization policy', () => {
     const env = {
       DB: db,
       MAIL_QUEUE: { send: async (job: MailQueueJob) => { jobs.push(job) } },
-      NAVER_MAIL_CREDENTIALS_KEY: 'naver-mail-test-key-that-is-longer-than-thirty-two-bytes',
-      NAVER_MAIL_IMAP_ENABLED: 'true',
+      MAIL_CREDENTIALS_KEY: 'naver-mail-test-key-that-is-longer-than-thirty-two-bytes',
     } as unknown as Env
 
     await expect(enqueueDueNaverMailSyncs(env, 1_000)).resolves.toBe(1)
@@ -68,12 +67,11 @@ describe('NAVER Mail synchronization policy', () => {
     ))).toBe(true)
   })
 
-  it('does not query D1 while the emergency switch is off', async () => {
+  it('缺少有效密钥时不查询 D1 或调度同步', async () => {
     const prepare = vi.fn()
     const env = {
       DB: { prepare },
-      NAVER_MAIL_CREDENTIALS_KEY: 'naver-mail-test-key-that-is-longer-than-thirty-two-bytes',
-      NAVER_MAIL_IMAP_ENABLED: 'false',
+      MAIL_CREDENTIALS_KEY: 'short',
     } as unknown as Env
 
     await expect(enqueueDueNaverMailSyncs(env)).resolves.toBe(0)

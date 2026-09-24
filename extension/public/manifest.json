@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "OmniMail Float",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "minimum_chrome_version": "120",
   "description": "在任意网页生成邮箱地址、读写已授权邮件，并接收多来源通知。",
   "icons": {

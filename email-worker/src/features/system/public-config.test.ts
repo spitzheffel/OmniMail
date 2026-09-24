@@ -24,8 +24,6 @@ describe('public registration configuration', () => {
     const env = environment({})
     env.MAIL_CREDENTIALS_KEY = 'global-do-not-return-this-secret-value'
     env.GMAIL_IMAP_ENABLED = 'false'
-    env.NAVER_MAIL_IMAP_ENABLED = 'true'
-    env.YANDEX_MAIL_IMAP_ENABLED = 'true'
     const config = await publicConfig(env)
     expect(config).toMatchObject({ iCloudEnabled: true, gmailEnabled: false,
       microsoftEnabled: true, qqMailEnabled: true, naverMailEnabled: true, yandexMailEnabled: true })
@@ -70,9 +68,7 @@ describe('public registration configuration', () => {
     env.MICROSOFT_CREDENTIALS_KEY = 'microsoft-do-not-return-this-secret-value'
     env.QQ_MAIL_CREDENTIALS_KEY = 'qq-mail-do-not-return-this-secret-value'
     env.NAVER_MAIL_CREDENTIALS_KEY = 'naver-mail-do-not-return-this-secret-value'
-    env.NAVER_MAIL_IMAP_ENABLED = 'true'
     env.YANDEX_MAIL_CREDENTIALS_KEY = 'yandex-mail-do-not-return-this-secret-value'
-    env.YANDEX_MAIL_IMAP_ENABLED = 'true'
     const config = await publicConfig(env)
 
     expect(config.iCloudEnabled).toBe(true)
@@ -117,8 +113,8 @@ describe('public registration configuration', () => {
     expect(defaults.gmailWorkspaceEnabled).toBe(true)
     expect(defaults.microsoftWorkspaceEnabled).toBe(true)
     expect(defaults.qqMailWorkspaceEnabled).toBe(true)
-    expect(defaults.naverMailWorkspaceEnabled).toBe(false)
-    expect(defaults.yandexMailWorkspaceEnabled).toBe(false)
+    expect(defaults.naverMailWorkspaceEnabled).toBe(true)
+    expect(defaults.yandexMailWorkspaceEnabled).toBe(true)
     expect(disabled.iCloudWorkspaceEnabled).toBe(false)
     expect(disabled.linuxDoMailWorkspaceEnabled).toBe(false)
     expect(disabled.gmailWorkspaceEnabled).toBe(false)
@@ -126,6 +122,22 @@ describe('public registration configuration', () => {
     expect(disabled.qqMailWorkspaceEnabled).toBe(false)
     expect(disabled.naverMailWorkspaceEnabled).toBe(false)
     expect(disabled.yandexMailWorkspaceEnabled).toBe(false)
+  })
+
+  it('旧环境开关不再生效，设置仅控制 NAVER 和 Yandex 入口显示', async () => {
+    const env = {
+      ...environment({ naver_mail_workspace_enabled: '0', yandex_mail_workspace_enabled: '0' }),
+      MAIL_CREDENTIALS_KEY: 'global-do-not-return-this-secret-value',
+      NAVER_MAIL_IMAP_ENABLED: 'false',
+      YANDEX_MAIL_IMAP_ENABLED: 'false',
+    }
+    expect(await publicConfig(env)).toMatchObject({
+      naverMailEnabled: true, yandexMailEnabled: true,
+      naverMailWorkspaceEnabled: false, yandexMailWorkspaceEnabled: false,
+    })
+    expect(await publicConfig({ ...env, MAIL_CREDENTIALS_KEY: '' })).toMatchObject({
+      naverMailEnabled: false, yandexMailEnabled: false,
+    })
   })
 
   it('exposes an empty random mailbox prefix by default', async () => {

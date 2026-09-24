@@ -1,14 +1,12 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
   createGmailAccount,
-  gmailAppPasswordField,
-  gmailEmailField,
-  gmailNameField,
   getGmailMessage,
   listGmailMessages,
   listGmailAccounts,
   requestGmailSync,
 } from './gmail-api'
+import { gmailAppPasswordField, gmailEmailField, gmailNameField } from './gmail-fields'
 import type { Env, SessionUser } from '../../app/types'
 
 const user = {
@@ -27,10 +25,19 @@ function request(body: unknown): Request {
 }
 
 describe('Gmail account API validation', () => {
-  it('normalizes only ordinary display spaces in the 16-character app password', () => {
+  it('normalizes display spaces, including non-breaking spaces, in the 16-character app password', () => {
     expect(gmailAppPasswordField('abcd efgh ijkl mnop')).toBe('abcdefghijklmnop')
+    expect(gmailAppPasswordField('abcd\u00A0efgh\u00A0ijkl\u00A0mnop')).toBe('abcdefghijklmnop')
+    expect(gmailAppPasswordField('abcd\u202Fefgh\u202Fijkl\u202Fmnop')).toBe('abcdefghijklmnop')
+    expect(gmailAppPasswordField('abcd\u2009efgh\u2009ijkl\u2009mnop')).toBe('abcdefghijklmnop')
+    expect(gmailAppPasswordField('abcd\u3000efgh\u3000ijkl\u3000mnop')).toBe('abcdefghijklmnop')
+    expect(gmailAppPasswordField('abcd\u200Befgh\u200Bijkl\u200Bmnop')).toBe('abcdefghijklmnop')
+    expect(gmailAppPasswordField(' abcd\u00A0efgh ijkl\u3000mnop ')).toBe('abcdefghijklmnop')
     expect(() => gmailAppPasswordField('google-account-password')).toThrow('16 位')
     expect(() => gmailAppPasswordField('abcd\tefghijklmnop')).toThrow('16 位')
+    expect(() => gmailAppPasswordField('abcd\nefghijklmnop')).toThrow('16 位')
+    expect(() => gmailAppPasswordField('abcd efgh ijkl mno')).toThrow('16 位')
+    expect(() => gmailAppPasswordField(undefined)).toThrow('16 位')
   })
 
   it('validates account labels and full email addresses', () => {

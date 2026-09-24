@@ -38,8 +38,10 @@ describe('Yandex Mail credential encryption', () => {
     expect(yandexMailCredentialsReady(env)).toBe(true)
   })
 
-  it('requires the IMAP feature switch to be explicitly enabled', () => {
-    expect(yandexMailImapEnabled(env)).toBe(false)
-    expect(yandexMailImapEnabled({ ...env, YANDEX_MAIL_IMAP_ENABLED: 'true' })).toBe(true)
+  it('密钥有效即可启用，不再依赖旧环境开关', () => {
+    const legacyEnv = { ...env, YANDEX_MAIL_IMAP_ENABLED: 'false' }
+    expect(yandexMailImapEnabled(env)).toBe(true)
+    expect(yandexMailImapEnabled(legacyEnv)).toBe(true)
+    expect(yandexMailImapEnabled({} as Env)).toBe(false)
   })
 })

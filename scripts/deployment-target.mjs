@@ -8,6 +8,24 @@ const ACCOUNT_ID = /^[a-f0-9]{32}$/i
 const DATABASE_ID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i
 const WORKER_NAME = /^[a-z0-9][a-z0-9-]{0,254}$/
 export const DEFAULT_DATABASE_NAME = 'omni-mail-db'
+const LEGACY_DATABASE_NAME = 'omnimail-db'
+
+async function databaseByName(get, accountId, name) {
+  // 数据库详情接口接收 UUID；名称查找使用列表过滤，并核对全名，避免误认近似名称。
+  for (let page = 1; page <= 100; page++) {
+    const query = new URLSearchParams({ name, per_page: '100', page: String(page) })
+    const databases = await get(`/accounts/${accountId}/d1/database?${query}`)
+    if (!Array.isArray(databases) || databases.length > 100 || databases.some((database) => (
+      typeof database?.name !== 'string' || !database.name || database.name.length > 255
+      || /[\0\r\n]/.test(database.name) || typeof database.uuid !== 'string' || !DATABASE_ID.test(database.uuid)
+    ))) throw new Error('D1 数据库列表响应无效，无法确认部署目标。')
+    const matches = databases.filter((database) => database.name === name)
+    if (matches.length > 1) throw new Error('D1 数据库名称查询结果不唯一，已停止部署。')
+    if (matches.length === 1) return matches[0]
+    if (databases.length < 100) return null
+  }
+  throw new Error('D1 数据库名称查询结果过多，请显式配置 database_id。')
+}
 
 export function deploymentEnvironment(values, inherited = process.env) {
   const files = values['env-file'] ?? ['.env', '.env.local', ...(values.env ? [`.env.${values.env}`, `.env.${values.env}.local`] : [])]
@@ -88,24 +106,33 @@ export async function resolveDeploymentTarget(values, { read = readDeploymentCon
   if (settings !== null) {
     if (!Array.isArray(settings?.bindings)) throw new Error('线上 Worker 绑定响应无效，已停止部署。')
     const existing = settings.bindings.filter((binding) => binding.name === 'DB')
-    if (existing.length !== 1 || existing[0].type !== 'd1' || typeof existing[0].id !== 'string' || !DATABASE_ID.test(existing[0].id)) {
+    if (existing.length > 1 || (existing.length === 1
+      && (existing[0].type !== 'd1' || typeof existing[0].id !== 'string' || !DATABASE_ID.test(existing[0].id)))) {
       throw new Error('已有 Worker 缺少有效的 DB 绑定，请在 Cloudflare 核对绑定，不能自动创建替代数据库。')
     }
-    databaseId = existing[0].id
-    if (configured.database_id && configured.database_id !== databaseId) {
+    databaseId = existing[0]?.id
+    if (databaseId && configured.database_id && configured.database_id !== databaseId) {
       throw new Error('配置中的 database_id 与线上 DB 绑定不一致，已停止以避免迁移或切换错库。')
     }
-  } else if (configured.database_id || configured.database_name) {
+  }
+  if (!databaseId && (configured.database_id || configured.database_name)) {
     const identifier = configured.database_id || configured.database_name
     if (typeof identifier !== 'string' || !identifier || identifier.length > 255 || /[\0\r\n]/.test(identifier)
       || (configured.database_id && !DATABASE_ID.test(identifier))) throw new Error('D1 数据库配置无效。')
-    const database = await get(`/accounts/${accountId}/d1/database/${encodeURIComponent(identifier)}`)
+    const database = configured.database_id
+      ? await get(`/accounts/${accountId}/d1/database/${encodeURIComponent(identifier)}`)
+      : await databaseByName(get, accountId, identifier)
     databaseId = database?.uuid
     if (typeof databaseId !== 'string' || !DATABASE_ID.test(databaseId)) throw new Error('指定的 D1 数据库不存在或返回的 ID 无效。')
-  } else {
-    const existing = await get(`/accounts/${accountId}/d1/database/${DEFAULT_DATABASE_NAME}`)
-    if (existing !== null) {
-      throw new Error(`首次部署目标尚未创建，但账户中已存在 ${DEFAULT_DATABASE_NAME}。请核对目标 Worker，或显式填写确认过的 database_id，不能自动复用同名数据库。`)
+    if (configured.database_id && configured.database_id !== databaseId) throw new Error('查询返回的 D1 ID 与配置不一致，已停止部署。')
+  } else if (!databaseId) {
+    // Workers Builds 可以预创建无 DB 的 Worker。其他服务的数据库与本次建库无关；
+    // 只对默认库名和历史库名的冲突停止，已有 DB 绑定始终优先，不能猜测换库。
+    for (const name of [DEFAULT_DATABASE_NAME, LEGACY_DATABASE_NAME]) {
+      if (await databaseByName(get, accountId, name)) {
+        const state = settings === null ? '首次部署目标尚未创建' : '已有 Worker 缺少有效的 DB 绑定'
+        throw new Error(`${state}，但账户中已存在 ${name}。请恢复 DB 绑定，或显式填写确认过的 database_id，不能自动复用同名数据库。`)
+      }
     }
   }
   return { ...loaded, values, workerName, accountId, bindings, databaseId, workerExists: settings !== null }

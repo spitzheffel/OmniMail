@@ -355,7 +355,7 @@ export function GmailAccountDialog({ accounts, startAdding = false, onClose, onC
                 aria-label={t(passwordVisible ? '隐藏应用密码' : '显示应用密码')}>
                 {passwordVisible ? <EyeOff size={17} /> : <Eye size={17} />}
               </button></span>
-            <small id="gmail-connect-password-help">{t('这不是 Google 账号主密码；可以直接粘贴带空格的分组格式。')}</small>
+            <small id="gmail-connect-password-help">{t('这不是 Google 账号主密码；可以直接粘贴带空格的分组格式，空格会被自动忽略。')}</small>
           </label>
           <footer className="gmail-connect-actions">
             <a className="button button--secondary" href="https://myaccount.google.com/apppasswords"

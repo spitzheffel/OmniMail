@@ -86,14 +86,10 @@ export async function publicConfig(env: Env) {
     qqMailEnabled: env.QQ_MAIL_IMAP_ENABLED !== 'false' && qqMailCredentialsReady(env),
     qqMailWorkspaceEnabled: env.QQ_MAIL_IMAP_ENABLED !== 'false'
       && settings.get('qq_mail_workspace_enabled') !== '0',
-    naverMailEnabled: env.NAVER_MAIL_IMAP_ENABLED === 'true'
-      && naverMailCredentialsReady(env),
-    naverMailWorkspaceEnabled: env.NAVER_MAIL_IMAP_ENABLED === 'true'
-      && settings.get('naver_mail_workspace_enabled') === '1',
-    yandexMailEnabled: env.YANDEX_MAIL_IMAP_ENABLED === 'true'
-      && yandexMailCredentialsReady(env),
-    yandexMailWorkspaceEnabled: env.YANDEX_MAIL_IMAP_ENABLED === 'true'
-      && settings.get('yandex_mail_workspace_enabled') === '1',
+    naverMailEnabled: naverMailCredentialsReady(env),
+    naverMailWorkspaceEnabled: settings.get('naver_mail_workspace_enabled') !== '0',
+    yandexMailEnabled: yandexMailCredentialsReady(env),
+    yandexMailWorkspaceEnabled: settings.get('yandex_mail_workspace_enabled') !== '0',
     iCloudWorkspaceEnabled: settings.get('icloud_workspace_enabled') !== '0',
     linuxDoMailWorkspaceEnabled: settings.get('linuxdo_mail_workspace_enabled') !== '0',
     registrationEnabled,

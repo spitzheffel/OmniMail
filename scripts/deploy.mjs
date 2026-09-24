@@ -55,7 +55,8 @@ export async function deploy(args = [], {
   const write = () => { const file = writeTarget(target); files.push(file); return file.path }
   const publish = (path) => retry(() => run(['deploy', ...targetArguments(values, path, true)]), { label: 'Worker 部署' })
   try {
-    if (!target.workerExists && !target.databaseId) {
+    // 目标解析已核对建库条件；Cloudflare 预先创建的空 Worker 也需要先配置资源再迁移。
+    if (!target.databaseId) {
       console.log(`首次部署：为 ${target.workerName} 创建资源绑定。`)
       await publish(write())
       try {

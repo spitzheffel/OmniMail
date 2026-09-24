@@ -189,8 +189,21 @@ interface MessageInput {
   hasAttachments: boolean
 }
 
+function normalizeIndexedDate(rawDate: number | string): number {
+  let parsed = typeof rawDate === 'number' ? rawDate : Date.parse(rawDate)
+  if (!Number.isFinite(parsed) && typeof rawDate === 'string') {
+    const numeric = Number(rawDate)
+    if (Number.isFinite(numeric) && rawDate.trim() !== '') {
+      parsed = numeric
+    }
+  }
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return 0
+  }
+  return parsed < 100_000_000_000 ? parsed * 1000 : parsed
+}
+
 export function normalizeIndexedMessage(message: MessageInput): IndexedMessageSummary {
-  const parsedDate = typeof message.date === 'number' ? message.date : Date.parse(message.date)
   return {
     id: message.id,
     accountId: message.account.id,
@@ -201,7 +214,7 @@ export function normalizeIndexedMessage(message: MessageInput): IndexedMessageSu
     recipients: message.recipients,
     subject: message.subject,
     preview: message.preview,
-    date: Number.isFinite(parsedDate) ? parsedDate : 0,
+    date: normalizeIndexedDate(message.date),
     isRead: message.isRead,
     hasAttachments: message.hasAttachments,
   }

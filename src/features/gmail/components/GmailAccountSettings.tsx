@@ -147,7 +147,7 @@ export function GmailAccountSettings({ account, view, status, accountError, rena
     </label>
     <p id={`gmail-password-help-${account.id}`} className="gmail-account-note">
       <ShieldCheck size={15} aria-hidden="true" />
-      {t('新凭据不会显示或保存到浏览器；旧凭据会保留到验证成功。')}</p>
+      {t('新凭据不会显示或保存到浏览器；旧凭据会保留到验证成功。可以直接粘贴带空格的分组格式。')}</p>
     <footer><button className="button button--primary" type="submit"
       disabled={disabled || !password.trim()}>
       {busy === `password:${account.id}` ? <LoaderCircle className="spin" size={16} />

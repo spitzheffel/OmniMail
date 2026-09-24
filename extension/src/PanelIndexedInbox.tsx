@@ -34,7 +34,8 @@ function errorText(error: unknown): string {
 }
 
 function formatDate(timestamp: number): string {
-  const date = new Date(timestamp)
+  const normalized = timestamp > 0 && timestamp < 100_000_000_000 ? timestamp * 1000 : timestamp
+  const date = new Date(normalized)
   const today = new Date()
   return new Intl.DateTimeFormat(getLocale(), date.toDateString() === today.toDateString()
     ? { hour: '2-digit', minute: '2-digit', hour12: false }

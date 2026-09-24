@@ -21,8 +21,8 @@ const defaultWorkspaceFeatures: WorkspaceFeatures = {
   gmailWorkspaceEnabled: true,
   microsoftWorkspaceEnabled: true,
   qqMailWorkspaceEnabled: true,
-  naverMailWorkspaceEnabled: false,
-  yandexMailWorkspaceEnabled: false,
+  naverMailWorkspaceEnabled: true,
+  yandexMailWorkspaceEnabled: true,
 }
 
 export type WorkspaceRoute =
