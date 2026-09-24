@@ -145,15 +145,23 @@ function objectRows(value: unknown): Record<string, unknown>[] | undefined {
  * comes first in key order — typically forwardToEmails, the user's own address.
  */
 function namedRows(value: unknown): Record<string, unknown>[] | undefined {
-  // Arrays are walked as well as objects: Apple wraps its payload differently
-  // per region, and `hmeEmails` sitting inside a list element is still the key
-  // that names the answer. Only isPlainObject decides what counts as a row.
-  if (!value || typeof value !== 'object') return undefined
-  const own = (value as { hmeEmails?: unknown }).hmeEmails
-  if (Array.isArray(own)) return own.filter(isPlainObject)
-  for (const child of Object.values(value)) {
-    const nested = namedRows(child)
-    if (nested) return nested
+  // Breadth-first, so the shallowest hmeEmails wins. Depth-first made the answer
+  // depend on key order: an empty hmeEmails nested under an earlier sibling hid
+  // the real list one level up. Arrays are walked as well as objects, since
+  // Apple wraps its payload differently per region; only isPlainObject decides
+  // what counts as a row.
+  let level: unknown[] = [value]
+  while (level.length) {
+    const next: unknown[] = []
+    for (const node of level) {
+      if (!node || typeof node !== 'object') continue
+      const own = (node as { hmeEmails?: unknown }).hmeEmails
+      if (Array.isArray(own)) return own.filter(isPlainObject)
+      // A loop rather than push(...values): spreading a large alias list into
+      // arguments can exceed the engine's argument limit.
+      for (const child of Object.values(node)) next.push(child)
+    }
+    level = next
   }
   return undefined
 }

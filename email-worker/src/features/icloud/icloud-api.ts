@@ -17,6 +17,7 @@ import {
 import {
   ICloudAccountStore,
   ICloudStoreError,
+  iCloudAliasCounts,
   parseICloudCookies,
   publicICloudAccount,
 } from './icloud-store'
@@ -268,13 +269,14 @@ export async function updateICloudCookies(
     const body = await jsonBody(request)
     const store = new ICloudAccountStore(env, user.id)
     const account = await store.get(id)
-    const knownTotal = account.aliasTotal
+    const known = iCloudAliasCounts(account)
     account.cookies = parseICloudCookies(body.cookies)
     const validationError = await validateAccount(account)
-    await store.saveCookies(account)
+    const writes = [store.saveCookies(account)]
     if (!validationError) {
-      await store.saveAliasSummary(account.id, account.aliasTotal, account.aliasActive, knownTotal)
+      writes.push(store.saveAliasSummary(account.id, iCloudAliasCounts(account), known))
     }
+    await Promise.all(writes)
     await writeAudit(env, user.id, 'icloud.credentials.cookies', id, ip, iCloudAuditDetail(account))
     return Response.json({ account: publicICloudAccount(account) })
   } catch (error) {
@@ -319,7 +321,7 @@ export async function listICloudAliases(
     if (!accountId) throw new ICloudStoreError(400, '缺少 accountId。')
     const store = new ICloudAccountStore(env, user.id)
     const account = await store.get(accountId)
-    const knownTotal = account.aliasTotal
+    const known = iCloudAliasCounts(account)
     if (!Object.keys(account.cookies).length && account.appleAccountState) {
       const appleClient = new AppleAccountClient(account.appleAccountState)
       try {
@@ -330,8 +332,10 @@ export async function listICloudAliases(
         account.appleAccountError = ''
         account.aliasTotal = aliases.length
         account.aliasActive = aliases.filter((alias) => alias.active).length
-        await store.saveAppleAccountState(account)
-        await store.saveAliasSummary(account.id, account.aliasTotal, account.aliasActive, knownTotal)
+        await Promise.all([
+          store.saveAppleAccountState(account),
+          store.saveAliasSummary(account.id, iCloudAliasCounts(account), known),
+        ])
         return Response.json({ aliases })
       } catch (error) {
         if (error instanceof ICloudRemoteError && error.code === APPLE_ACCOUNT_ERROR_CODES.auth) {
@@ -360,8 +364,10 @@ export async function listICloudAliases(
       account.aliasActive = aliases.filter((alias) => alias.active).length
       account.lastValidated = new Date().toISOString()
       account.lastError = ''
-      await store.saveCookies(account)
-      await store.saveAliasSummary(account.id, account.aliasTotal, account.aliasActive, knownTotal)
+      await Promise.all([
+        store.saveCookies(account),
+        store.saveAliasSummary(account.id, iCloudAliasCounts(account), known),
+      ])
       return Response.json({ aliases })
     } catch (error) {
       account.cookies = client.cookies
@@ -412,6 +418,11 @@ export async function previewICloudAlias(
       throw error
     }
     account.cookies = client.cookies
+    // Apple just accepted this jar, so a failure recorded against it earlier is
+    // stale. The catch above marks the account; this is the matching unmark,
+    // without which it would stay sorted last until an alias listing ran.
+    account.status = 'active'
+    account.lastError = ''
     await store.saveCookies(account)
     return Response.json({ email, previewId: client.clientId })
   } catch (error) {

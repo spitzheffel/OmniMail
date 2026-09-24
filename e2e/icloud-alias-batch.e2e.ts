@@ -1,6 +1,9 @@
 import { expect, test } from '@playwright/test'
 import { mockICloud } from './icloud-fixtures'
 
+/** How long a test waits to show that a request was *not* made. */
+const QUIET_WINDOW_MS = 600
+
 test('switching channels mid-preview does not strand the draft cards', async ({ page }) => {
   const state = await mockICloud(page, {
     hasAppleAccount: true,
@@ -51,6 +54,26 @@ test('a spent hour keeps the drafted address and disables the reroll', async ({ 
   await expect(dialog.getByRole('button', { name: '为隐藏邮箱 1 换一个地址' })).toBeDisabled()
   await expect(dialog.getByRole('button', { name: /创建 \d+ 个/ })).toBeDisabled()
   await expect(dialog.getByRole('button', { name: '增加邮箱' })).toBeDisabled()
-  // The mount preview had already been sent; nothing may follow it.
+  // Nothing may follow the mount preview. Absence needs a quiet window: checked
+  // straight away, a preview fired a few hundred milliseconds later went unseen.
+  await page.waitForTimeout(QUIET_WINDOW_MS)
+  expect(state.previewedEmails).toEqual(['preview-one@icloud.com'])
+})
+
+test('continuing after the last slot is spent does not preview a new card', async ({ page }) => {
+  // With every card created, prune reseeds one fresh card. The hour is spent by
+  // then, so previewing it could only come back as a cap error.
+  const state = await mockICloud(page, { quota: { apple: null, web: 1 } })
+  await page.goto('/icloud')
+
+  await page.getByRole('button', { name: '创建隐藏邮箱' }).click()
+  const dialog = page.getByRole('dialog', { name: '创建隐藏邮箱' })
+  await expect(dialog.getByText('preview-one@icloud.com', { exact: true })).toBeVisible()
+  await dialog.getByRole('button', { name: /创建 \d+ 个/ }).click()
+  await expect(dialog.getByText(/成功 1 个，失败 0 个。/)).toBeVisible()
+
+  await dialog.getByRole('button', { name: '继续创建' }).click()
+  await expect(dialog.getByText('本小时额度已用完')).toBeVisible()
+  await page.waitForTimeout(QUIET_WINDOW_MS)
   expect(state.previewedEmails).toEqual(['preview-one@icloud.com'])
 })

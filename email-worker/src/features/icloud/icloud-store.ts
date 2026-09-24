@@ -115,6 +115,18 @@ export function publicICloudAccount(account: ICloudAccount): PublicICloudAccount
   }
 }
 
+/** The pair of counters a listing reports, or the pair a request started from. */
+export interface ICloudAliasCounts {
+  total: number
+  active: number
+}
+
+export function iCloudAliasCounts(
+  account: Pick<ICloudAccount, 'aliasTotal' | 'aliasActive'>,
+): ICloudAliasCounts {
+  return { total: account.aliasTotal, active: account.aliasActive }
+}
+
 /**
  * An empty jar is stored as '' rather than as the ciphertext of '{}', so the
  * SQL-side `cookies_cipher <> ''` availability checks agree with the
@@ -419,21 +431,23 @@ export class ICloudAccountStore {
    * Session writers must not use this: they load the account, wait on Apple,
    * then save, so their snapshot would regress a concurrent create.
    *
-   * `knownTotal` is what alias_total said when this request read the account.
-   * A listing is only authoritative for the state it observed, so if a create
-   * has incremented the row since, that increment is the newer fact and the
-   * write is skipped — the next listing reconciles. Required rather than
+   * `known` is what the row said when this request read the account. A listing
+   * is only authoritative for the state it observed, so if either counter has
+   * moved since — a create's increment, another request's deactivate — that
+   * change is the newer fact and the write is skipped; the next listing
+   * reconciles. Both columns are compared because deactivate and reactivate
+   * move alias_active without touching the total. Required rather than
    * optional so a new caller has to decide what its listing is relative to.
    */
   async saveAliasSummary(
-    id: string, total: number, active: number, knownTotal: number,
+    id: string, counts: ICloudAliasCounts, known: ICloudAliasCounts,
   ): Promise<void> {
     await this.env.DB.prepare(
       `UPDATE icloud_accounts SET alias_total = ?, alias_active = ?, updated_at = ?
-       WHERE id = ? AND user_id = ? AND alias_total = ?`,
+       WHERE id = ? AND user_id = ? AND alias_total = ? AND alias_active = ?`,
     ).bind(
-      Math.max(0, total), Math.max(0, active), new Date().toISOString(),
-      id, this.userId, knownTotal,
+      Math.max(0, counts.total), Math.max(0, counts.active), new Date().toISOString(),
+      id, this.userId, known.total, known.active,
     ).run()
   }
 

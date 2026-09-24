@@ -216,6 +216,32 @@ describe('Apple Account private email client', () => {
     ])
   })
 
+  it('prefers the shallowest hmeEmails over one nested in an earlier array', async () => {
+    // Depth-first, the empty list inside data[0] was reached before result's
+    // real one purely because 'data' sorts first — and zero was persisted.
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(Response.json({
+      data: [{ summary: { hmeEmails: [] } }],
+      result: { hmeEmails: [{ emailAddress: 'Shop@icloud.com', id: 'a1' }] },
+    }))
+    const client = new AppleAccountClient(state())
+
+    await expect(client.listAliases()).resolves.toEqual([
+      expect.objectContaining({ email: 'shop@icloud.com', anonymousId: 'a1' }),
+    ])
+  })
+
+  it('prefers the shallowest hmeEmails over one nested in an earlier object', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(Response.json({
+      meta: { previous: { hmeEmails: [] } },
+      result: { hmeEmails: [{ emailAddress: 'Shop@icloud.com', id: 'a1' }] },
+    }))
+    const client = new AppleAccountClient(state())
+
+    await expect(client.listAliases()).resolves.toEqual([
+      expect.objectContaining({ email: 'shop@icloud.com', anonymousId: 'a1' }),
+    ])
+  })
+
   it('skips an empty sibling array to reach the alias list', async () => {
     // [].every() is vacuously true; an empty list ahead of hmeEmails in key
     // order must not be mistaken for "this account has zero aliases".

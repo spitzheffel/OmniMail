@@ -3,7 +3,7 @@ import {
   ICloudRemoteError,
   type ICloudClient,
 } from './icloud-apple'
-import type { ICloudAccountStore } from './icloud-store'
+import { iCloudAliasCounts, type ICloudAccountStore } from './icloud-store'
 import type { ICloudAccount } from './icloud-types'
 
 /**
@@ -12,16 +12,16 @@ import type { ICloudAccount } from './icloud-types'
  * listing leaves the pre-request snapshot on `account`, and writing that back
  * would undo an increment a concurrent create landed meanwhile.
  *
- * The absolute write is guarded by the total this request started from, so even
- * a successful listing yields to a create that arrived after it was taken: that
- * increment is the newer fact, and the next listing reconciles the rest.
+ * The absolute write is guarded by the counts this request started from, so even
+ * a successful listing yields to a create or deactivate that landed after it was
+ * taken: that change is the newer fact, and the next listing reconciles the rest.
  */
 export async function refreshICloudAliasSummary(
   store: ICloudAccountStore,
   account: ICloudAccount,
   client: ICloudClient,
 ): Promise<void> {
-  const knownTotal = account.aliasTotal
+  const known = iCloudAliasCounts(account)
   account.cookies = client.cookies
   account.status = 'active'
   account.lastError = ''
@@ -43,8 +43,8 @@ export async function refreshICloudAliasSummary(
       message: error instanceof Error ? error.message : String(error),
     })
   }
-  await store.saveCookies(account)
-  if (listed) {
-    await store.saveAliasSummary(account.id, account.aliasTotal, account.aliasActive, knownTotal)
-  }
+  // Disjoint columns, so neither write has to queue behind the other.
+  const writes = [store.saveCookies(account)]
+  if (listed) writes.push(store.saveAliasSummary(account.id, iCloudAliasCounts(account), known))
+  await Promise.all(writes)
 }
