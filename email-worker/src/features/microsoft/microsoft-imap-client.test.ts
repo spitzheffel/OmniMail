@@ -64,7 +64,8 @@ describe('Microsoft IMAP authentication boundary', () => {
     ])
     vi.mocked(connect).mockReturnValue(fixture.socket)
     const client = new MicrosoftImapClient('user@outlook.com', 'oauth2', 'access-token')
-    await expect(client.open()).rejects.toMatchObject({ status: 400 })
+    // The server's wording travels along for the logs, without the tag.
+    await expect(client.open()).rejects.toMatchObject({ status: 400, detail: 'NO AUTHENTICATE failed' })
     const commands = fixture.commands()
     expect(commands).toMatch(/AUTHENTICATE XOAUTH2 [A-Za-z0-9+/=]+\r\n\r\n$/)
     expect(commands).not.toMatch(/\bLOGIN\b/)

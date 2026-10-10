@@ -86,7 +86,8 @@ email--------refresh_token----client_id
 
 连接成功后：
 
-- 后台约每 5 分钟同步一次 INBOX 元数据，每账号最多保留最近 500 条；
+- 后台约每 5 分钟同步一次 INBOX 元数据，每账号最多保留最近 500 条；同步中途中断而留下的
+  账号租约过期后，下一次 Cron 会把账号记为 `stale_lease` 并重新同步；
 - 工作区可聚合全部账号 INBOX，或选择单账号与服务器返回的文件夹；
 - 单次读取数量可选 25、50、100 或 200，服务端仍强制限制为 1–200；
 - “全部 Microsoft”范围的同步按钮会为所有已连接账号逐个请求 INBOX Queue 同步；
@@ -106,6 +107,9 @@ email--------refresh_token----client_id
   独立复制按钮。
 - 全部范围使用“同步全部 Microsoft 账号”；单账号范围使用“远程刷新当前文件夹”。
 - 账号管理支持修改备注、验证、同步、替换 OAuth2 凭据、单个断开和批量断开。
+- 有账号需要处理时，列表上方的提示条提供“全部验证”：一次最多同时验证 3 个出错账号并显示
+  进度；验证次数达到用户/IP 窗口上限后停止，剩余账号提示稍后再试。验证通过的账号在下一次
+  Cron（约 5 分钟内）恢复同步，不必等原先排定的重试时间。
 - 批量断开会逐个删除 OmniMail 本地记录，并显示当前进度；操作前需要二次确认。
 - 连接、批量导入和账号管理共用稳定高度的响应式弹窗；内容过长时只在弹窗内部滚动。
 
@@ -121,7 +125,7 @@ email--------refresh_token----client_id
 5. 在全部范围触发同步，确认每个账号均进入 Queue；切换单账号后确认当前文件夹可远程刷新；
 6. 顶部复制按钮和范围面板复制按钮只复制预期邮箱，不泄露其他凭据；
 7. 手动同步入队后更新时间变化，下一次 Cron 同步不产生重复记录；
-8. 撤销应用授权后，账号进入凭据或权限错误且不会无限重试；
+8. 撤销应用授权后，账号进入凭据或权限错误：凭据错误不再自动重试，权限错误只每 6 小时复查一次；
 9. 如需宣称 Microsoft 365 支持，再用受控工作/学校账号重复以上步骤，并确认租户允许 IMAP。
 
 OmniMail 不使用 ROPC、密码 LOGIN、网页登录自动化、代理或其他规避措施。
@@ -137,7 +141,12 @@ OmniMail 不使用 ROPC、密码 LOGIN、网页登录自动化、代理或其他
 - API 响应使用 `private, no-store`；审计只记录脱敏邮箱和认证模式。
 - `invalid_grant` 通常表示 refresh token 失效或被撤销；请重新授权并替换凭据。
 - `imap_scope_missing` 表示 token 不含 Outlook IMAP 委托 scope。
-- `imap_access_rejected` 或 `permission_error` 可能表示租户关闭 IMAP、缺少同意或条件访问阻止。
+- `imap_access_rejected` 表示 Microsoft 拒绝了 XOAUTH2 登录。Microsoft 偶尔也会拒绝有效的
+  token，且回复与真正缺少权限时相同，所以连续被拒不满 6 小时时账号只记为暂时错误，每 15 分钟
+  自动重试；持续 6 小时都被拒才转为 `permission_error`，这时多半是租户关闭 IMAP、缺少同意或
+  条件访问阻止。`permission_error` 账号仍每 6 小时自动复查一次，权限修好后会自行恢复，也可用
+  “全部验证”立即复查。Microsoft 拒绝时的原始回复会写入 Worker 日志（`Microsoft IMAP refused
+  the account`），便于判断原因。
 - `credential_decryption_failed` 表示部署密钥与保存凭据时不一致；恢复原
   `MAIL_CREDENTIALS_KEY`（旧密文对应 `MICROSOFT_CREDENTIALS_KEY`），或断开后重新连接账号。
 

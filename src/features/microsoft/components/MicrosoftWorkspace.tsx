@@ -14,17 +14,13 @@ import '../../../shared/ui/mail-workspace/styles/workspace.css'
 import '../../gmail/styles/gmail-dialog.css'
 import '../../gmail/styles/gmail-workspace.css'
 import '../styles/microsoft-workspace.css'
+import type { MicrosoftVerifyOutcome } from '../model/microsoft-verify'
 import { MicrosoftAccountDialog } from './MicrosoftAccountDialog'
+import { MicrosoftAccountWarning } from './MicrosoftAccountWarning'
 import { MicrosoftReader } from './MicrosoftReader'
 import { MicrosoftScopeSwitcher } from './MicrosoftScopeSwitcher'
 
 const emptyPage: PageInfo = { hasMore: false, nextCursor: null, limit: 50 }
-function accountWarning(accounts: MicrosoftAccount[]) {
-  const failed = accounts.filter(({ status }) => ['credential_error', 'permission_error', 'error'].includes(status))
-  return failed.length ? t('{count} 个 Microsoft 账号需要处理，其他账号仍可继续使用。', {
-    count: failed.length,
-  }) : ''
-}
 
 export function MicrosoftWorkspace({ enabled, remoteImagesEnabled }: {
   enabled: boolean
@@ -203,6 +199,15 @@ export function MicrosoftWorkspace({ enabled, remoteImagesEnabled }: {
     finally { setRemoteRefreshing(false) }
   }
 
+  async function verifiedAll({ verified, failed, skipped }: MicrosoftVerifyOutcome) {
+    setError(''); setNotice('')
+    try { await loadAccounts() } catch (loadError) { setError(errorMessage(loadError)); return }
+    if (skipped) setError(t('验证过于频繁，还有 {skipped} 个账号未验证，请稍后再试。', { skipped }))
+    else if (failed) {
+      setError(t('{verified} 个账号验证通过，{failed} 个仍未通过，可在账号设置中查看原因。', { verified, failed }))
+    } else setNotice(t('{verified} 个 Microsoft 账号验证通过。', { verified }))
+  }
+
   function chooseAccount(next: string) {
     setAccountId(next); setFolderPath('INBOX'); setSelected(null); setDetail(null); setDetailError('')
   }
@@ -248,7 +253,7 @@ export function MicrosoftWorkspace({ enabled, remoteImagesEnabled }: {
           onChange={(event) => setQuery(event.target.value)} />
         {query && <button type="button" onClick={() => setQuery('')} aria-label={t('清除搜索')}>
           <X size={14} /></button>}</label>}
-      {accountWarning(accounts) && <p className="gmail-partial-error" role="status"><AlertCircle size={15} />{accountWarning(accounts)}</p>}
+      <MicrosoftAccountWarning accounts={accounts} onVerified={verifiedAll} />
       {error && <p className="list-error" role="alert"><AlertCircle size={15} />{error}</p>}
       <div className="gmail-message-list" aria-busy={loading}>
         {!enabled ? <div className="icloud-empty"><span><KeyRound size={24} /></span>

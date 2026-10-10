@@ -1,4 +1,5 @@
 import type { Env, MicrosoftSyncJob, SessionUser } from '../../app/types'
+import { ImapConnectionError } from '../../platform/imap/imap-errors'
 import { writeAudit } from '../../shared/audit/audit'
 import { sha256 } from '../auth/session/auth'
 import { microsoftMailEnabled } from './microsoft-credentials'
@@ -18,8 +19,13 @@ import {
   publicMicrosoftAccount,
   saveMicrosoftFolders,
 } from './microsoft-store'
-import { refreshMicrosoftFolders } from './microsoft-sync'
-import { refreshMicrosoftToken } from './microsoft-token'
+import {
+  logMicrosoftRefusal,
+  microsoftFailureState,
+  microsoftSyncErrorCode,
+  refreshMicrosoftFolders,
+} from './microsoft-sync'
+import { MicrosoftTokenError, refreshMicrosoftToken } from './microsoft-token'
 import type {
   MicrosoftAccount,
   MicrosoftFolder,
@@ -284,21 +290,20 @@ async function recordRemoteFailure(
   account: MicrosoftAccount,
   error: unknown,
 ): Promise<void> {
-  const response = microsoftResponseError(error, account.authMode)
-  const body: { code?: string } = await response.clone().json<{ code?: string }>()
-    .catch(() => ({}))
-  const code = body.code || 'connection_failed'
-  const status = [
-    'invalid_grant', 'invalid_client', 'basic_auth_rejected',
-  ].includes(code) ? 'credential_error'
-    : ['imap_scope_missing', 'imap_access_rejected', 'xoauth2_unavailable'].includes(code)
-      ? 'permission_error' : 'error'
+  // Only Microsoft's answers say anything about the account: a refused rate
+  // limit, a token refresh already under way or a D1 fault leaves it as it was.
+  if (!(error instanceof MicrosoftTokenError) && !(error instanceof ImapConnectionError)
+    && !(error instanceof MicrosoftStoreError && error.code === 'inbox_unavailable')) return
+  const code = microsoftSyncErrorCode(error, account.authMode)
   const now = Math.floor(Date.now() / 1000)
+  const state = microsoftFailureState(code, account.lastErrorAt ?? now, now)
+  logMicrosoftRefusal(account.id, code, state, error)
   try {
     await env.DB.prepare(
       `UPDATE microsoft_imap_accounts SET status = ?, last_error_code = ?,
-              last_error_at = ?, updated_at = ? WHERE id = ?`,
-    ).bind(status, code, now, now, account.id).run()
+              last_error_at = COALESCE(last_error_at, ?), next_sync_at = ?, updated_at = ?
+        WHERE id = ?`,
+    ).bind(state.status, code, now, state.retryAt, now, account.id).run()
   } catch { /* preserve remote error */ }
 }
 
@@ -320,9 +325,11 @@ export async function verifyMicrosoftAccount(
     await client.examineFolder(inbox.path)
     const now = Math.floor(Date.now() / 1000)
     await saveMicrosoftFolders(env, accountId, folders, now)
+    // Back on the schedule's next tick rather than whenever the failure had
+    // put its next attempt.
     await env.DB.prepare(
       `UPDATE microsoft_imap_accounts SET status = 'active', last_error_code = '',
-              last_error_at = NULL, updated_at = ?
+              last_error_at = NULL, next_sync_at = 0, updated_at = ?
         WHERE id = ? AND user_id = ?`,
     ).bind(now, accountId, user.id).run()
     await writeAudit(env, user.id, 'microsoft.account.verify', accountId, ip, {

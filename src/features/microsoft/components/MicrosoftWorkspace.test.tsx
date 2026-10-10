@@ -1,6 +1,8 @@
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
+import type { MicrosoftAccount } from '../../../shared/api'
 import { MicrosoftAccountDialog } from './MicrosoftAccountDialog'
+import { MicrosoftAccountWarning } from './MicrosoftAccountWarning'
 import { MicrosoftReader } from './MicrosoftReader'
 import { MicrosoftWorkspace } from './MicrosoftWorkspace'
 
@@ -14,6 +16,18 @@ describe('Microsoft workspace safety and accessibility boundaries', () => {
     expect(html).toContain('microsoft-list-pane')
     expect(html).toContain('选择一封 Microsoft 邮件')
     expect(html).not.toContain('正文和附件只在打开时读取')
+  })
+
+  it('offers to verify every account that needs attention, and stays away otherwise', () => {
+    const accounts = (['active', 'permission_error', 'error', 'syncing'] as const).map((status, index) => (
+      { id: `microsoft-${index}`, status } as MicrosoftAccount
+    ))
+    const html = renderToStaticMarkup(<MicrosoftAccountWarning accounts={accounts}
+      onVerified={async () => undefined} />)
+    expect(html).toContain('2 个 Microsoft 账号需要处理')
+    expect(html).toContain('全部验证')
+    expect(renderToStaticMarkup(<MicrosoftAccountWarning accounts={accounts.slice(0, 1)}
+      onVerified={async () => undefined} />)).toBe('')
   })
 
   it('opens an accessible OAuth2-only connection dialog', () => {

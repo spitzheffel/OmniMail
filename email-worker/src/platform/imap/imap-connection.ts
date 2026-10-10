@@ -10,6 +10,7 @@ const COMMAND_TIMEOUT_MS = 20_000
 const CLOSE_TIMEOUT_MS = 2_000
 const MAX_LINE_BYTES = 1_048_576
 const MAX_RESPONSE_BYTES = 12 * 1024 * 1024
+const MAX_DETAIL_LENGTH = 200
 const encoder = new TextEncoder()
 
 export interface ImapCommandResult {
@@ -142,7 +143,7 @@ export class ImapConnection {
     } catch (error) {
       this.abort()
       if (error instanceof ImapConnectionError && error.status === 401) {
-        throw new ImapConnectionError(400, `IMAP 登录失败，请检查${this.credentialHint}。`, true)
+        throw new ImapConnectionError(400, `IMAP 登录失败，请检查${this.credentialHint}。`, true, error.detail)
       }
       if (error instanceof ImapConnectionError) throw error
       throw new ImapConnectionError(502, `连接${this.serviceLabel}失败。`)
@@ -170,7 +171,7 @@ export class ImapConnection {
     } catch (error) {
       this.abort()
       if (error instanceof ImapConnectionError && error.status === 401) {
-        throw new ImapConnectionError(400, 'IMAP OAuth2 认证失败。', true)
+        throw new ImapConnectionError(400, 'IMAP OAuth2 认证失败。', true, error.detail)
       }
       if (error instanceof ImapConnectionError) throw error
       throw new ImapConnectionError(502, `连接${this.serviceLabel}失败。`)
@@ -245,6 +246,7 @@ export class ImapConnection {
               failureStatus,
               failureStatus === 401 ? 'IMAP 服务拒绝了登录凭据。' : 'IMAP 命令失败。',
               true,
+              line.slice(tag.length + 1, tag.length + 1 + MAX_DETAIL_LENGTH),
             )
           }
           return result

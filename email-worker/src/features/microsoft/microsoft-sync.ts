@@ -12,6 +12,7 @@ import {
 import { MicrosoftTokenError } from './microsoft-token'
 import type {
   MicrosoftAccount,
+  MicrosoftAccountStatus,
   MicrosoftFolder,
   MicrosoftMessageMetadata,
 } from './microsoft-types'
@@ -21,8 +22,27 @@ const INDEX_MESSAGE_LIMIT = 500
 const SYNC_INTERVAL_SECONDS = 5 * 60
 const LEASE_SECONDS = 6 * 60
 const SCHEDULE_BATCH = 50
+// Microsoft now and then refuses a valid token with the very reply it gives
+// for a missing permission, so a refusal is retried before it is believed.
+const REFUSED_RETRY_SECONDS = 15 * 60
+const REFUSED_PERSISTS_SECONDS = 6 * 60 * 60
+// Accounts waiting on a permission are still looked at now and then, so a fix
+// made on the Microsoft side brings them back without a manual check.
+const ATTENTION_RETRY_SECONDS = 6 * 60 * 60
+const CREDENTIAL_ERROR_CODES = [
+  'invalid_grant', 'invalid_client', 'credential_decryption_failed',
+  'credential_key_unavailable', 'basic_auth_rejected',
+]
+const PERMISSION_ERROR_CODES = [
+  'imap_scope_missing', 'imap_access_rejected', 'xoauth2_unavailable',
+  'invalid_scope', 'unauthorized_client', 'consent_required',
+]
 
 export type MicrosoftSyncResult = { status: 'synced' | 'skipped'; retryable: boolean }
+export type MicrosoftFailureState = {
+  status: Extract<MicrosoftAccountStatus, 'credential_error' | 'permission_error' | 'error'>
+  retryAt: number
+}
 
 export function microsoftSyncErrorCode(error: unknown, authMode?: MicrosoftAccount['authMode']): string {
   if (error instanceof MicrosoftTokenError) return error.code
@@ -40,6 +60,41 @@ export function microsoftSyncErrorCode(error: unknown, authMode?: MicrosoftAccou
   return 'sync_failed'
 }
 
+/**
+ * Where a failed sync or check leaves the account. `failingSince` is when its
+ * current run of failures began, which `last_error_at` keeps until a success.
+ * Nothing schedules credential errors: only the user can fix those.
+ */
+export function microsoftFailureState(
+  code: string,
+  failingSince: number,
+  now: number,
+): MicrosoftFailureState {
+  if (CREDENTIAL_ERROR_CODES.includes(code)) {
+    return { status: 'credential_error', retryAt: now + ATTENTION_RETRY_SECONDS }
+  }
+  if (code === 'imap_access_rejected' && now - failingSince < REFUSED_PERSISTS_SECONDS) {
+    return { status: 'error', retryAt: now + REFUSED_RETRY_SECONDS }
+  }
+  if (PERMISSION_ERROR_CODES.includes(code)) {
+    return { status: 'permission_error', retryAt: now + ATTENTION_RETRY_SECONDS }
+  }
+  return { status: 'error', retryAt: now + SYNC_INTERVAL_SECONDS }
+}
+
+/** Microsoft's own wording is the only clue to why it refused a token it issued. */
+export function logMicrosoftRefusal(
+  accountId: string,
+  code: string,
+  state: MicrosoftFailureState,
+  error: unknown,
+): void {
+  if (!(error instanceof ImapConnectionError) || !error.detail) return
+  console.warn('Microsoft IMAP refused the account', {
+    accountId, code, status: state.status, detail: error.detail,
+  })
+}
+
 export function missingMicrosoftUids(localUids: number[], remoteUids: number[]): number[] {
   const remote = new Set(remoteUids)
   return localUids.filter((uid) => !remote.has(uid))
@@ -54,7 +109,7 @@ async function claimLease(
   const result = await env.DB.prepare(
     `UPDATE microsoft_imap_accounts
         SET sync_lease_id = ?, sync_lease_until = ?, status = 'syncing', updated_at = ?
-      WHERE id = ? AND status NOT IN ('credential_error', 'permission_error')
+      WHERE id = ? AND status != 'credential_error'
         AND (sync_lease_until IS NULL OR sync_lease_until <= ?)`,
   ).bind(leaseId, now + LEASE_SECONDS, now, accountId, now).run()
   return Boolean(result.meta.changes)
@@ -223,33 +278,19 @@ async function recordFailure(
   accountId: string,
   leaseId: string,
   error: unknown,
-  authMode: MicrosoftAccount['authMode'] | undefined,
+  account: MicrosoftAccount | null,
   now: number,
-): Promise<string> {
-  const code = microsoftSyncErrorCode(error, authMode)
-  const credentialError = [
-    'invalid_grant', 'invalid_client', 'credential_decryption_failed',
-    'credential_key_unavailable', 'basic_auth_rejected',
-  ].includes(code)
-  const permissionError = [
-    'imap_scope_missing', 'imap_access_rejected', 'xoauth2_unavailable',
-    'invalid_scope', 'unauthorized_client', 'consent_required',
-  ].includes(code)
+): Promise<{ code: string; state: MicrosoftFailureState }> {
+  const code = microsoftSyncErrorCode(error, account?.authMode)
+  const state = microsoftFailureState(code, account?.lastErrorAt ?? now, now)
+  logMicrosoftRefusal(accountId, code, state, error)
   await env.DB.prepare(
     `UPDATE microsoft_imap_accounts
-        SET status = ?, last_error_code = ?, last_error_at = ?, next_sync_at = ?,
-            sync_lease_id = NULL, sync_lease_until = NULL, updated_at = ?
+        SET status = ?, last_error_code = ?, last_error_at = COALESCE(last_error_at, ?),
+            next_sync_at = ?, sync_lease_id = NULL, sync_lease_until = NULL, updated_at = ?
       WHERE id = ? AND sync_lease_id = ?`,
-  ).bind(
-    credentialError ? 'credential_error' : permissionError ? 'permission_error' : 'error',
-    code,
-    now,
-    now + ((credentialError || permissionError) ? 24 * 60 * 60 : SYNC_INTERVAL_SECONDS),
-    now,
-    accountId,
-    leaseId,
-  ).run()
-  return code
+  ).bind(state.status, code, now, state.retryAt, now, accountId, leaseId).run()
+  return { code, state }
 }
 
 export async function syncMicrosoftAccount(
@@ -288,15 +329,13 @@ export async function syncMicrosoftAccount(
     ).bind(now, now + SYNC_INTERVAL_SECONDS, now, accountId, leaseId).run()
     return { status: 'synced', retryable: false }
   } catch (error) {
-    const code = await recordFailure(env, accountId, leaseId, error, account?.authMode, now)
+    const { code, state } = await recordFailure(env, accountId, leaseId, error, account, now)
+    // Only a passing fault earns the queue's quick retries; a refusal keeps to
+    // its own slower schedule.
     return {
       status: 'skipped',
-      retryable: ![
-        'invalid_grant', 'invalid_client', 'credential_decryption_failed',
-        'credential_key_unavailable', 'basic_auth_rejected', 'imap_scope_missing',
-        'imap_access_rejected', 'xoauth2_unavailable', 'invalid_scope',
-        'response_too_large', 'account_not_found',
-      ].includes(code),
+      retryable: state.status === 'error'
+        && !['imap_access_rejected', 'response_too_large', 'account_not_found'].includes(code),
     }
   } finally {
     await client?.close()
@@ -321,18 +360,31 @@ export async function enqueueDueMicrosoftSyncs(
   now = Math.floor(Date.now() / 1000),
 ): Promise<number> {
   if (!microsoftMailEnabled(env)) return 0
+  // A sync that died holding its lease leaves the account `syncing`; once the
+  // lease runs out it is retried like any other failure.
   const { results } = await env.DB.prepare(
     `SELECT id FROM microsoft_imap_accounts
-      WHERE status IN ('active', 'error') AND next_sync_at <= ?
+      WHERE ((status IN ('active', 'error', 'permission_error') AND next_sync_at <= ?)
+          OR status = 'syncing')
         AND (sync_lease_until IS NULL OR sync_lease_until <= ?)
       ORDER BY next_sync_at, id LIMIT ?`,
   ).bind(now, now, SCHEDULE_BATCH).all<{ id: string }>()
   let queued = 0
   for (const account of results) {
     const claimed = await env.DB.prepare(
-      `UPDATE microsoft_imap_accounts SET next_sync_at = ?, updated_at = ?
-        WHERE id = ? AND next_sync_at <= ?`,
-    ).bind(now + SYNC_INTERVAL_SECONDS, now, account.id, now).run()
+      `UPDATE microsoft_imap_accounts
+          SET next_sync_at = ?, updated_at = ?,
+              status = CASE WHEN status = 'syncing' THEN 'error' ELSE status END,
+              last_error_code = CASE
+                WHEN status = 'syncing' THEN 'stale_lease' ELSE last_error_code END,
+              last_error_at = CASE
+                WHEN status = 'syncing' THEN COALESCE(last_error_at, ?) ELSE last_error_at END,
+              sync_lease_id = CASE WHEN status = 'syncing' THEN NULL ELSE sync_lease_id END,
+              sync_lease_until = CASE WHEN status = 'syncing' THEN NULL ELSE sync_lease_until END
+        WHERE id = ? AND (sync_lease_until IS NULL OR sync_lease_until <= ?)
+          AND ((status IN ('active', 'error', 'permission_error') AND next_sync_at <= ?)
+            OR status = 'syncing')`,
+    ).bind(now + SYNC_INTERVAL_SECONDS, now, now, account.id, now, now).run()
     if (!claimed.meta.changes) continue
     try {
       const job: MicrosoftSyncJob = {

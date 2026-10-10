@@ -435,3 +435,72 @@ test('browses Microsoft mail, reflects Seen updates, and renders on mobile', asy
   await expect(mobileDialog.locator('.microsoft-dialog-body')).toHaveCSS('overflow-y', 'hidden')
   await expect(mobileDialog.locator('.microsoft-account-card-list')).toHaveCSS('overflow-y', 'auto')
 })
+
+test('verifies every Microsoft account that needs attention from the warning', async ({ page }) => {
+  await prepare(page)
+  const accounts = [
+    { ...account, id: 'microsoft-ok', name: '正常', email: 'ok@outlook.com' },
+    { ...account, id: 'microsoft-refused', name: '被拒', email: 'refused@outlook.com',
+      status: 'permission_error', lastErrorCode: 'imap_access_rejected' },
+    { ...account, id: 'microsoft-flaky', name: '偶发', email: 'flaky@outlook.com',
+      status: 'error', lastErrorCode: 'imap_access_rejected' },
+  ]
+  const recovered = new Set<string>()
+  const checked: string[] = []
+  let refusing = true
+  let throttled = false
+  let releaseChecks: () => void = () => undefined
+  const checksHeld = new Promise<void>((resolve) => { releaseChecks = resolve })
+  await page.route('**://*/api/**', async (route) => {
+    const request = route.request()
+    const path = new URL(request.url()).pathname
+    if (await shell(route, path)) return
+    if (path === '/api/microsoft/accounts' && request.method() === 'GET') {
+      return json(route, { enabled: true, accounts: accounts.map((item) => recovered.has(item.id)
+        ? { ...item, status: 'active', lastErrorCode: '' } : item) })
+    }
+    if (path === '/api/microsoft/messages') {
+      return json(route, { messages: [], page: { hasMore: false, nextCursor: null, limit: 50 }, folderPath: 'INBOX' })
+    }
+    const verify = path.match(/^\/api\/microsoft\/accounts\/([^/]+)\/verify$/)
+    if (verify && request.method() === 'POST') {
+      checked.push(verify[1])
+      await checksHeld
+      if (throttled) {
+        return json(route, { error: 'Microsoft 凭据验证过于频繁，请稍后重试。', code: 'validation_rate_limited' }, 429)
+      }
+      if (refusing && verify[1] === 'microsoft-refused') {
+        return json(route, { error: 'Microsoft 拒绝 IMAP OAuth2 登录；请检查权限或租户是否启用 IMAP。',
+          code: 'imap_access_rejected' }, 400)
+      }
+      recovered.add(verify[1])
+      return json(route, { ok: true, validatedAt: 1_787_486_400 })
+    }
+    return route.abort()
+  })
+
+  await page.goto('/microsoft')
+  const warning = page.locator('.gmail-partial-error')
+  await expect(warning).toContainText('2 个 Microsoft 账号需要处理')
+  await warning.getByRole('button', { name: '全部验证' }).click()
+  // Held on the server side, so the in-progress state cannot slip past.
+  await expect(warning.getByRole('button', { name: '正在验证 0/2…' })).toBeDisabled()
+  await expect.poll(() => [...checked].sort()).toEqual(['microsoft-flaky', 'microsoft-refused'])
+  releaseChecks()
+  await expect(page.getByText('1 个账号验证通过，1 个仍未通过，可在账号设置中查看原因。')).toBeVisible()
+  await expect(warning).toContainText('1 个 Microsoft 账号需要处理')
+
+  throttled = true
+  await warning.getByRole('button', { name: '全部验证' }).click()
+  await expect(page.getByText('验证过于频繁，还有 1 个账号未验证，请稍后再试。')).toBeVisible()
+  await expect(warning).toContainText('1 个 Microsoft 账号需要处理')
+
+  throttled = false
+  refusing = false
+  await warning.getByRole('button', { name: '全部验证' }).click()
+  await expect(page.getByText('1 个 Microsoft 账号验证通过。')).toBeVisible()
+  await expect(warning).toHaveCount(0)
+  // Each later round checked only the account still failing, never the healthy one.
+  expect(checked.slice(2)).toEqual(['microsoft-refused', 'microsoft-refused'])
+  expect(checked).not.toContain('microsoft-ok')
+})

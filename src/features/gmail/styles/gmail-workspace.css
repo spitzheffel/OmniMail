@@ -10,6 +10,31 @@
   font-size: 11px;
 }
 
+.gmail-partial-error__text { flex: 1; min-width: 0; }
+.gmail-partial-error__action {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 9px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.gmail-partial-error__action:hover:not(:disabled),
+.gmail-partial-error__action:focus-visible {
+  outline: 0;
+  background: color-mix(in srgb, currentColor 12%, transparent);
+}
+
+.gmail-partial-error__action:disabled { cursor: progress; opacity: 0.75; }
+
 .gmail-list-pane > .list-error { margin: 10px 14px 0; }
 
 .gmail-message-list {
