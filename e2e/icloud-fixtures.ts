@@ -8,6 +8,14 @@ export async function mockICloud(page: Page, options: {
   failCreateAt?: number
   hasAppPassword?: boolean
   hasAppleAccount?: boolean
+  /** Status of the Apple session when one is configured. */
+  appleAccountStatus?: 'active' | 'expired'
+  /** Fail the alias listing with this message. */
+  aliasListError?: string
+  /** List aliases through Apple in place of a rejected jar, reporting this jar error. */
+  aliasListCookieError?: string
+  /** Answer a manual Apple session refresh with a rejection that marks it expired. */
+  rejectAppleRefresh?: boolean
   rejectAccountCreate?: boolean
   /** Remaining creations this hour; null marks the channel as unusable. */
   quota?: { apple?: number | null; web?: number | null }
@@ -42,9 +50,12 @@ export async function mockICloud(page: Page, options: {
   const cookieUpdates: string[] = []
   const passwordUpdates: Array<{ icloudEmail: string; appPassword: string }> = []
   const deletedAccountIds: string[] = []
+  const appleAccountDeletes: string[] = []
   let accountDeleted = false
   let createAttempts = 0
   let accountName = 'Personal'
+  let appleAccountStatus = options.appleAccountStatus ?? 'active'
+  let accountLoadsFail = false
   const previewCandidates = [
     'preview-one@icloud.com', 'github-1@icloud.com', 'github-2@icloud.com',
     'github-3@icloud.com', 'github-4@icloud.com', 'github-5@icloud.com',
@@ -92,8 +103,10 @@ export async function mockICloud(page: Page, options: {
       icloudEmail: 'owner@icloud.com', host: 'icloud.com', status: 'active',
       aliasTotal: 1, aliasActive: 1, lastValidated: '2026-08-13T00:00:00.000Z',
       lastError: '', createdAt: '2026-08-13T00:00:00.000Z',
-      hasCookies: webRemaining !== null, hasAppPassword, hasAppleAccount,
-      appleAccountStatus: hasAppleAccount ? 'active' : 'none', appleAccountExpiresAt: '',
+      hasCookies: webRemaining !== null, hasAppPassword,
+      hasAppleAccount: hasAppleAccount && !appleAccountDeletes.length,
+      appleAccountStatus: hasAppleAccount && !appleAccountDeletes.length ? appleAccountStatus : 'none',
+      appleAccountExpiresAt: '',
     }
     if (path === '/api/icloud/accounts' && request.method() === 'POST') {
       accountCreates.push(request.postDataJSON())
@@ -106,7 +119,19 @@ export async function mockICloud(page: Page, options: {
       })
       return json(route, { account })
     }
-    if (path === '/api/icloud/accounts') return json(route, { accounts: accountDeleted ? [] : [account] })
+    if (path === '/api/icloud/accounts') {
+      if (accountLoadsFail) return route.fulfill({
+        status: 500, contentType: 'application/json', body: JSON.stringify({ error: '读取 iCloud 账号失败。' }),
+      })
+      return json(route, { accounts: accountDeleted ? [] : [account] })
+    }
+    if (path === '/api/icloud/accounts/icloud-1/apple-account/refresh' && options.rejectAppleRefresh) {
+      appleAccountStatus = 'expired'
+      return route.fulfill({
+        status: 422, contentType: 'application/json',
+        body: JSON.stringify({ error: 'Apple Account 管理态已失效，请重新导入登录态。' }),
+      })
+    }
     if (path === '/api/icloud/accounts/icloud-1' && request.method() === 'DELETE') {
       accountDeleted = true
       deletedAccountIds.push('icloud-1')
@@ -117,6 +142,10 @@ export async function mockICloud(page: Page, options: {
       accountName = input.name
       accountNames.push(input.name)
       return json(route, { ok: true, name: input.name })
+    }
+    if (path === '/api/icloud/accounts/icloud-1/apple-account' && request.method() === 'DELETE') {
+      appleAccountDeletes.push('icloud-1')
+      return json(route, { ok: true })
     }
     if (path === '/api/icloud/accounts/icloud-1/cookies' && request.method() === 'PUT') {
       const input = request.postDataJSON() as { cookies: string }
@@ -182,6 +211,12 @@ export async function mockICloud(page: Page, options: {
       const budget = channel === 'apple_account' ? (appleRemaining ?? 0) : (webRemaining ?? 0)
       return json(route, { alias, channel, remaining: Math.max(0, budget - used) })
     }
+    if (path === '/api/icloud/aliases' && options.aliasListError) return route.fulfill({
+      status: 502, contentType: 'application/json', body: JSON.stringify({ error: options.aliasListError }),
+    })
+    if (path === '/api/icloud/aliases' && options.aliasListCookieError) {
+      return json(route, { aliases, cookieError: options.aliasListCookieError })
+    }
     if (path === '/api/icloud/aliases') return json(route, { aliases })
     if (path === '/api/icloud/inbox') {
       const alias = url.searchParams.get('alias') || ''
@@ -207,7 +242,9 @@ export async function mockICloud(page: Page, options: {
     return route.abort()
   })
   return {
-    accountCreates, accountNames, cookieUpdates, createdChannels, createdEmails, createdLabels,
+    accountCreates, accountNames, appleAccountDeletes, cookieUpdates, createdChannels, createdEmails, createdLabels,
+    /** Fail every account-list load from now on. */
+    failAccountLoads: () => { accountLoadsFail = true },
     createdPreviewIds, deletedAccountIds,
     inboxAliases, inboxQueries, messageReads, passwordUpdates, previewedEmails,
   }

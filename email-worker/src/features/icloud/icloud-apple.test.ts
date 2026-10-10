@@ -262,6 +262,21 @@ describe('legacy Hide My Email failure classification', () => {
       .rejects.toMatchObject({ status: 429, code: 'icloud_web_hme_limit' })
   })
 
+  it.each([
+    ['an error object', { error: { errorCode: '-41015', errorMessage: 'You have reached the limit of addresses you can create at this time. Try again later.' } }],
+    ['a numeric error beside a reason', { error: 1, reason: 'You have reached the limit of addresses you can create at this time. Try again later.' }],
+    ['a string code beside a reason', { error: '-41015', reason: 'You have reached the limit of addresses you can create at this time. Try again later.' }],
+  ])('recognises the hourly cap carried in %s', async (_shape, envelope) => {
+    // Read as a flat string only, the reason came out '' or '1': the cap became
+    // a definitive refusal, and settleWebClaim refunded a slot Apple had spent.
+    vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(validationResponse())
+      .mockResolvedValueOnce(Response.json({ success: false, ...envelope }))
+
+    await expect(new ICloudClient({ session: 'value' }, 'icloud.com').createAlias('Shop'))
+      .rejects.toMatchObject({ status: 429, code: 'icloud_web_hme_limit' })
+  })
+
   it('leaves a timeout non-definitive so the reservation is not refunded', async () => {
     vi.spyOn(globalThis, 'fetch')
       .mockResolvedValueOnce(validationResponse())

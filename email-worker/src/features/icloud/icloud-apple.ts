@@ -33,6 +33,12 @@ export const APPLE_ACCOUNT_ERROR_CODES = {
   auth: 'apple_account_auth_failed',
   limit: 'apple_account_hme_limit',
   api: 'apple_account_api_failed',
+  /**
+   * The endpoint does not exist for this account (404/405/410/501), or answered
+   * without a list we can read. Distinct from `api` so a listing can treat "no
+   * list here" as an empty answer without also swallowing timeouts and outages.
+   */
+  unavailable: 'apple_account_api_unavailable',
   missing: 'apple_account_session_missing',
   // Raised by our own local cooldown, never by Apple. It must stay distinct
   // from `limit` so the create handler cannot mistake its own rejection for a
@@ -63,8 +69,21 @@ function iCloudHmeLimitReason(reason: string): boolean {
     || reason.includes('创建上限')
 }
 
+/**
+ * Apple has phrased the same refusal three ways: a string `error`, a numeric
+ * `error` beside a `reason`, and an `error` object carrying the message. Prose
+ * comes first wherever it sits, since the cap is recognised only from wording;
+ * a bare code is the last resort.
+ */
 function iCloudHmeReason(data: Record<string, unknown>): string {
-  return nonEmpty(data.error, data.reason, data.errorMessage, data.message).slice(0, 300)
+  const nested = data.error && typeof data.error === 'object' && !Array.isArray(data.error)
+    ? data.error as Record<string, unknown>
+    : {}
+  const prose = [
+    data.error, data.reason, data.errorMessage, data.message,
+    nested.errorMessage, nested.message, nested.reason,
+  ].find((value): value is string => typeof value === 'string' && /[^\d\s+-]/.test(value))
+  return (prose || nonEmpty(data.error, nested.errorCode, nested.code)).slice(0, 300)
 }
 
 function iCloudHmeFailure(data: Record<string, unknown>, fallback: string): ICloudRemoteError {

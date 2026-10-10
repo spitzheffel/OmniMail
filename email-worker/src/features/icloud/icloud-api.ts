@@ -1,6 +1,5 @@
 import { writeAudit } from '../../shared/audit/audit'
 import {
-  APPLE_ACCOUNT_ERROR_CODES,
   ICloudClient,
   ICLOUD_CREDENTIAL_ERROR_STATUS,
   ICLOUD_WEB_ERROR_CODES,
@@ -8,15 +7,17 @@ import {
 } from './icloud-apple'
 import { exhaustICloudAliasChannel } from './icloud-alias-quota'
 import { refreshICloudAliasSummary } from './icloud-alias-summary'
-import { AppleAccountClient } from './icloud-account-client'
 import {
   deleteICloudAppleAccount,
+  listAppleAccountAliases,
   refreshICloudAppleAccount,
   updateICloudAppleAccount,
+  type KeepAlive,
 } from './icloud-account-api'
 import {
   ICloudAccountStore,
   ICloudStoreError,
+  iCloudAliasChannels,
   iCloudAliasCounts,
   parseICloudCookies,
   publicICloudAccount,
@@ -313,6 +314,7 @@ export async function listICloudAliases(
   env: Env,
   user: SessionUser,
   request: Request,
+  keepAlive?: KeepAlive,
 ): Promise<Response> {
   try {
     const accountId = new URL(request.url).searchParams.get('accountId') || ''
@@ -321,44 +323,7 @@ export async function listICloudAliases(
     const account = await store.get(accountId)
     const known = iCloudAliasCounts(account)
     if (!Object.keys(account.cookies).length && account.appleAccountState) {
-      const appleClient = new AppleAccountClient(account.appleAccountState)
-      // listAliases() refreshes a stale session first, rotating scnt upstream
-      // whether or not the listing after it succeeds.
-      const refreshes = !appleClient.isUsable()
-      try {
-        const aliases = await appleClient.listAliases()
-        account.appleAccountState = appleClient.state
-        account.appleAccountStatus = 'active'
-        account.appleAccountExpiresAt = appleClient.state.expiresAt
-        account.appleAccountError = ''
-        account.aliasTotal = aliases.length
-        account.aliasActive = aliases.filter((alias) => alias.active).length
-        await Promise.all([
-          store.saveAppleAccountState(account),
-          store.saveAliasSummary(account, known),
-        ])
-        return Response.json({ aliases })
-      } catch (error) {
-        if (error instanceof ICloudRemoteError
-          && (refreshes || error.code === APPLE_ACCOUNT_ERROR_CODES.auth)) {
-          // Same rule as createICloudAlias: dropping the rotated state leaves a
-          // dead scnt in the store, and the next create marks the account expired.
-          account.appleAccountState = appleClient.state
-          account.appleAccountExpiresAt = appleClient.state.expiresAt
-          if (error.code === APPLE_ACCOUNT_ERROR_CODES.auth) {
-            account.appleAccountStatus = 'expired'
-            account.appleAccountError = error.message.slice(0, 300)
-          }
-          await store.saveAppleAccountState(account).catch(() => undefined)
-        }
-        if (error instanceof ICloudRemoteError && error.code === APPLE_ACCOUNT_ERROR_CODES.api) {
-          // Apple Account management does not expose the legacy HME list on
-          // every region. Creation remains usable even when that optional
-          // listing endpoint is unavailable.
-          return Response.json({ aliases: [] })
-        }
-        throw error
-      }
+      return await listAppleAccountAliases(store, account, { keepAlive })
     }
     if (!Object.keys(account.cookies).length) {
       throw new ICloudStoreError(400, '该账号尚未配置 Cookie。')
@@ -380,8 +345,14 @@ export async function listICloudAliases(
     } catch (error) {
       account.cookies = client.cookies
       account.lastError = error instanceof Error ? error.message.slice(0, 300) : '同步失败。'
-      if (error instanceof ICloudRemoteError && error.status === ICLOUD_CREDENTIAL_ERROR_STATUS) account.status = 'error'
+      const rejected = error instanceof ICloudRemoteError && error.status === ICLOUD_CREDENTIAL_ERROR_STATUS
+      if (rejected) account.status = 'error'
       await store.saveCookies(account)
+      // A jar Apple rejected says nothing about the Apple Account session, which
+      // creation already prefers; list through it instead of failing the view.
+      if (rejected && iCloudAliasChannels(account).appleAccount) {
+        return await listAppleAccountAliases(store, account, { cookieError: error, keepAlive })
+      }
       throw error
     }
   } catch (error) {

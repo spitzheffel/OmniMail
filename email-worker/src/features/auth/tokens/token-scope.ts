@@ -160,6 +160,9 @@ export async function deviceScopesAllow(scopes: string, request: Request): Promi
   if (requestMethod === 'GET' && path === '/api/icloud/aliases') {
     return hasScope(scopes, 'icloud:aliases:read')
   }
+  if (requestMethod === 'GET' && path === '/api/icloud/aliases/quota') {
+    return hasScope(scopes, 'icloud:aliases:read')
+  }
   if (requestMethod === 'POST' && path === '/api/icloud/aliases/preview') {
     return hasScope(scopes, 'icloud:aliases:preview')
   }

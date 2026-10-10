@@ -50,10 +50,10 @@ beforeEach(async () => {
 })
 
 describe('真实 D1 邮箱密钥迁移', () => {
-  it('读取进度不会写入；分页处理全部 11 个字段，重试幂等且删除旧密钥后可解密', async () => {
+  it('读取进度不会写入；分页处理全部 12 个字段，重试幂等且删除旧密钥后可解密', async () => {
     const environment = mixed()
     const before = await mailCredentialMigrationStatus(environment)
-    expect(before).toMatchObject({ total: 11, migrated: 0, pending: 11 })
+    expect(before).toMatchObject({ total: 12, migrated: 0, pending: 12 })
     expect(await mailCredentialMigrationStatus(environment)).toEqual(before)
     const keyId = (await globalMailKeyId(environment))!
     let cursor: MigrationCursor | null = { field: 0, afterId: '' }
@@ -63,7 +63,7 @@ describe('真实 D1 邮箱密钥迁移', () => {
       expect(batch.failed).toBe(0)
       cursor = batch.cursor
     } while (cursor)
-    expect(await mailCredentialMigrationStatus(environment)).toMatchObject({ total: 11, migrated: 11, pending: 0 })
+    expect(await mailCredentialMigrationStatus(environment)).toMatchObject({ total: 12, migrated: 12, pending: 0 })
     expect((await migrateMailCredentialBatch(environment, keyId, { field: 0, afterId: '' })).scanned).toBe(0)
     for (const field of mailCredentialFields) {
       const { results } = await env.DB.prepare(`SELECT id, ${field.column} AS cipher, updated_at FROM ${field.table} WHERE ${field.column} <> ''`)
@@ -88,7 +88,7 @@ describe('真实 D1 邮箱密钥迁移', () => {
       cursor = batch.cursor
     } while (cursor)
     expect(failed).toBe(1)
-    expect(await mailCredentialMigrationStatus(environment)).toMatchObject({ migrated: 10, pending: 1 })
+    expect(await mailCredentialMigrationStatus(environment)).toMatchObject({ migrated: 11, pending: 1 })
     expect(await env.DB.prepare('SELECT app_password_cipher AS cipher FROM gmail_imap_accounts').first())
       .toEqual({ cipher: 'invalid-cipher' })
   })

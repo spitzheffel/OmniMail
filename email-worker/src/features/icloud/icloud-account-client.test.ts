@@ -4,7 +4,7 @@ import {
   ICloudRemoteError,
 } from './icloud-apple'
 import { AppleAccountClient } from './icloud-account-client'
-import { withAppleAccountCreateGate } from './icloud-account-api'
+import { withAppleAccountSessionGate } from './icloud-account-api'
 import type { AppleAccountState } from './icloud-types'
 
 afterEach(() => vi.restoreAllMocks())
@@ -99,12 +99,12 @@ describe('Apple Account private email client', () => {
 
   it('serializes concurrent creates for the same account', async () => {
     const order: string[] = []
-    const first = withAppleAccountCreateGate('same-account', async () => {
+    const first = withAppleAccountSessionGate('same-account', async () => {
       order.push('first-start')
       await new Promise((resolve) => setTimeout(resolve, 5))
       order.push('first-end')
     })
-    const second = withAppleAccountCreateGate('same-account', async () => {
+    const second = withAppleAccountSessionGate('same-account', async () => {
       order.push('second-start')
     })
     await Promise.all([first, second])
@@ -119,7 +119,33 @@ describe('Apple Account private email client', () => {
     const error = await client.listAliases().catch((reason) => reason)
 
     expect(error).toBeInstanceOf(ICloudRemoteError)
-    expect((error as ICloudRemoteError).code).toBe(APPLE_ACCOUNT_ERROR_CODES.api)
+    expect((error as ICloudRemoteError).code).toBe(APPLE_ACCOUNT_ERROR_CODES.unavailable)
+  })
+
+  it('reads a missing endpoint as "no list here" only for the list itself', async () => {
+    // A 404 from the refresh before the listing is a broken session, not a
+    // region without the list, and limit wording on any call stays a limit.
+    vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response('', { status: 404 }))
+      .mockResolvedValueOnce(new Response('too many addresses, rate limit', { status: 410 }))
+
+    await expect(new AppleAccountClient(state({ expiresAt: '' })).listAliases())
+      .rejects.toMatchObject({ code: APPLE_ACCOUNT_ERROR_CODES.api })
+    await expect(new AppleAccountClient(state()).createAlias('Shop'))
+      .rejects.toMatchObject({ code: APPLE_ACCOUNT_ERROR_CODES.limit })
+  })
+
+  it('tells a missing listing endpoint apart from an outage', async () => {
+    // Only the first may be read as "this region has no list"; answering an
+    // outage with an empty list hid every failure behind a blank alias pane.
+    vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response('', { status: 404 }))
+      .mockResolvedValueOnce(new Response('', { status: 503 }))
+
+    await expect(new AppleAccountClient(state()).listAliases())
+      .rejects.toMatchObject({ code: APPLE_ACCOUNT_ERROR_CODES.unavailable })
+    await expect(new AppleAccountClient(state()).listAliases())
+      .rejects.toMatchObject({ code: APPLE_ACCOUNT_ERROR_CODES.api })
   })
 
   it('still reports a genuinely empty list as empty', async () => {
@@ -279,7 +305,7 @@ describe('Apple Account private email client', () => {
     }))
     const client = new AppleAccountClient(state())
 
-    await expect(client.listAliases()).rejects.toMatchObject({ code: APPLE_ACCOUNT_ERROR_CODES.api })
+    await expect(client.listAliases()).rejects.toMatchObject({ code: APPLE_ACCOUNT_ERROR_CODES.unavailable })
   })
 
   it('does not take an empty array for the unnamed alias list', async () => {

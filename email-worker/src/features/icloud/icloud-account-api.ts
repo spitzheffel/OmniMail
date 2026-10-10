@@ -15,38 +15,139 @@ import {
   type ICloudAliasChannel,
 } from './icloud-alias-quota'
 import { refreshICloudAliasSummary } from './icloud-alias-summary'
-import { AppleAccountClient, type AppleAccountAlias } from './icloud-account-client'
+import {
+  APPLE_ACCOUNT_REQUEST_TIMEOUT_MS,
+  AppleAccountClient,
+  type AppleAccountAlias,
+} from './icloud-account-client'
 import {
   ICloudAccountStore,
   ICloudStoreError,
   iCloudAliasChannels,
+  iCloudAliasCounts,
   parseICloudCookies,
   publicICloudAccount,
 } from './icloud-store'
 import type { AppleAccountState, ICloudAccount } from './icloud-types'
 import type { Env, SessionUser } from '../../app/types'
 
-const appleAccountCreateGates = new Map<string, Promise<void>>()
+const appleAccountSessionHolds = new Map<string, { since: number }>()
+const APPLE_SESSION_GATE_POLL_MS = 25
+/**
+ * Past this a hold counts as abandoned. It has to outlast any live holder: a
+ * create on a stale session makes up to five sequential Apple calls of up to
+ * APPLE_ACCOUNT_REQUEST_TIMEOUT_MS each, and breaking into a live hold replays
+ * the scnt it is about to rotate. A holder kept alive with `keepAlive` releases
+ * on its own after a disconnect; this bound covers callers without one and
+ * holders Workers cancels once the waitUntil allowance runs out.
+ */
+export const APPLE_SESSION_GATE_MAX_HOLD_MS = 6 * APPLE_ACCOUNT_REQUEST_TIMEOUT_MS
+
+/** Registers work that must outlive the request (ExecutionContext.waitUntil). */
+export type KeepAlive = (task: Promise<unknown>) => void
 
 /**
- * Serializes creates for one account. Apple rotates `scnt` and the session id on
- * every successful response, so two concurrent multi-step creates on the same
- * session corrupt each other. Rate limiting lives in icloud-alias-quota.ts; this
- * gate only enforces single flight.
+ * Serializes Apple Account calls for one account: creates, listings and manual
+ * refreshes. Apple rotates `scnt` and the session id on every successful
+ * response, so two overlapping calls on one session replay each other's stale
+ * values. Callers adopt the stored session inside the gate (currentAppleSession)
+ * and persist what they rotated before leaving it, so whoever waits behind them
+ * starts from the fresh scnt.
+ *
+ * Workers drops a request mid-await when its client disconnects, which the web
+ * client does routinely (switching accounts aborts the listing, and every call
+ * has a 15 s timeout). A dropped holder would lose the scnt Apple just rotated
+ * and leave its hold for the next request to wait out, so once the hold is
+ * taken the operation runs under `keepAlive`. Waiting is not kept alive: a
+ * request nobody is waiting for any more should not start Apple calls.
+ *
+ * Waiters poll instead of awaiting the holder's promise: a promise settled from
+ * another request's context is not something a Workers request can safely
+ * wait on. The map is per isolate; across isolates, and once a hold is
+ * abandoned, advanceAppleAccountState keeps an overlapping write from undoing
+ * a newer one. Rate limiting lives in icloud-alias-quota.ts; this gate only
+ * enforces single flight.
  */
-export async function withAppleAccountCreateGate<T>(accountId: string, operation: () => Promise<T>): Promise<T> {
-  const previous = appleAccountCreateGates.get(accountId) || Promise.resolve()
-  let release!: () => void
-  const current = new Promise<void>((resolve) => { release = resolve })
-  const queued = previous.catch(() => undefined).then(() => current)
-  appleAccountCreateGates.set(accountId, queued)
-  await previous.catch(() => undefined)
-  try {
-    return await operation()
-  } finally {
-    release()
-    if (appleAccountCreateGates.get(accountId) === queued) appleAccountCreateGates.delete(accountId)
+export async function withAppleAccountSessionGate<T>(
+  accountId: string,
+  operation: () => Promise<T>,
+  keepAlive?: KeepAlive,
+): Promise<T> {
+  for (;;) {
+    const held = appleAccountSessionHolds.get(accountId)
+    if (!held || Date.now() - held.since > APPLE_SESSION_GATE_MAX_HOLD_MS) break
+    await new Promise((resolve) => setTimeout(resolve, APPLE_SESSION_GATE_POLL_MS))
   }
+  const hold = { since: Date.now() }
+  appleAccountSessionHolds.set(accountId, hold)
+  const run = (async () => {
+    try {
+      return await operation()
+    } finally {
+      if (appleAccountSessionHolds.get(accountId) === hold) appleAccountSessionHolds.delete(accountId)
+    }
+  })()
+  keepAlive?.(run.catch(() => undefined))
+  return run
+}
+
+interface AppleSession {
+  client: AppleAccountClient
+  /** sessionValues(client.state) as adopted, to tell whether Apple has rotated anything since. */
+  adopted: string
+}
+
+/** The state minus lastCheckedAt, a local timestamp rather than a value Apple handed out. */
+function sessionValues(state: AppleAccountState): string {
+  return JSON.stringify({ ...state, lastCheckedAt: '' })
+}
+
+/** Whether Apple handed out new session values since the session was adopted. */
+function appleSessionRotated({ client, adopted }: AppleSession): boolean {
+  return sessionValues(client.state) !== adopted
+}
+
+/**
+ * Adopt the Apple session as it is stored right now. Called inside the gate, so
+ * a request that queued behind another starts from the scnt that one rotated
+ * instead of the copy it read on arrival.
+ */
+async function currentAppleSession(store: ICloudAccountStore, account: ICloudAccount): Promise<AppleSession> {
+  const current = await store.get(account.id)
+  if (!current.appleAccountState) throw new ICloudStoreError(400, '该账号尚未配置 Apple Account 管理态。')
+  account.appleAccountState = current.appleAccountState
+  account.appleAccountStatus = current.appleAccountStatus
+  account.appleAccountExpiresAt = current.appleAccountExpiresAt
+  account.appleAccountError = current.appleAccountError
+  account.appleAccountRead = current.appleAccountRead
+  account.aliasTotal = current.aliasTotal
+  account.aliasActive = current.aliasActive
+  const client = new AppleAccountClient(current.appleAccountState)
+  return { client, adopted: sessionValues(client.state) }
+}
+
+/**
+ * Record what Apple rotated, unless the stored session moved on since it was
+ * adopted. Only values from successful responses are on `client.state`, so a
+ * refreshed scnt survives a later step failing.
+ */
+function persistAppleSession(
+  store: ICloudAccountStore,
+  account: ICloudAccount,
+  session: AppleSession,
+  patch: Partial<Pick<ICloudAccount, 'appleAccountStatus' | 'appleAccountError'>> = {},
+): Promise<boolean> {
+  account.appleAccountState = session.client.state
+  account.appleAccountExpiresAt = session.client.state.expiresAt
+  Object.assign(account, patch)
+  return store.advanceAppleAccountState(account, appleSessionRotated(session))
+}
+
+/** An auth failure means Apple rejected the stored session outright. */
+function expiredPatch(error: ICloudRemoteError): Partial<Pick<ICloudAccount, 'appleAccountStatus' | 'appleAccountError'>> {
+  return error.code === APPLE_ACCOUNT_ERROR_CODES.auth
+    ? { appleAccountStatus: 'expired', appleAccountError: error.message.slice(0, 300) }
+    : {}
 }
 
 function stringField(value: unknown): string {
@@ -137,17 +238,36 @@ export async function updateICloudAppleAccount(env: Env, user: SessionUser, id: 
   } catch (error) { return responseError(error) }
 }
 
-export async function refreshICloudAppleAccount(env: Env, user: SessionUser, id: string): Promise<Response> {
+export async function refreshICloudAppleAccount(
+  env: Env,
+  user: SessionUser,
+  id: string,
+  keepAlive?: KeepAlive,
+): Promise<Response> {
   try {
     const store = new ICloudAccountStore(env, user.id)
     const account = await store.get(id)
     if (!account.appleAccountState) throw new ICloudStoreError(400, '该账号尚未配置 Apple Account 管理态。')
-    const client = new AppleAccountClient(account.appleAccountState)
-    await client.refresh()
-    account.appleAccountState = client.state; account.appleAccountStatus = 'active'
-    account.appleAccountExpiresAt = client.state.expiresAt; account.appleAccountError = ''
-    await store.saveAppleAccountState(account)
-    return Response.json({ account: publicICloudAccount(account) })
+    const saved = await withAppleAccountSessionGate(id, async () => {
+      const session = await currentAppleSession(store, account)
+      try {
+        await session.client.refresh()
+      } catch (error) {
+        // The token call may already have rotated scnt before a later step
+        // failed; keep that, and record a session Apple rejected outright.
+        if (error instanceof ICloudRemoteError) {
+          await persistAppleSession(store, account, session, expiredPatch(error)).catch(() => false)
+        }
+        throw error
+      }
+      return persistAppleSession(store, account, session, { appleAccountStatus: 'active', appleAccountError: '' })
+    }, keepAlive)
+    if (saved) return Response.json({ account: publicICloudAccount(account) })
+    // Superseded by a newer write: report what is stored, not this request's
+    // copy, and a session removed meanwhile is not something that refreshed.
+    const current = await store.get(id)
+    if (!current.appleAccountState) throw new ICloudStoreError(400, '该账号尚未配置 Apple Account 管理态。')
+    return Response.json({ account: publicICloudAccount(current) })
   } catch (error) { return responseError(error) }
 }
 
@@ -194,6 +314,7 @@ export async function createICloudAlias(
   user: SessionUser,
   request: Request,
   ip: string,
+  keepAlive?: KeepAlive,
 ): Promise<Response> {
   try {
     const body = await request.json<Record<string, unknown>>()
@@ -223,9 +344,6 @@ export async function createICloudAlias(
     if (useAppleAccount) {
       if (email || previewId) throw new ICloudStoreError(400, 'Apple Account 新接口创建不接受旧接口预览地址。')
       if (!account.appleAccountState) throw new ICloudStoreError(400, '该账号尚未配置 Apple Account 管理态。')
-      const client = new AppleAccountClient(account.appleAccountState)
-      let claimed = false
-      let refreshed = false
       try {
         // Refresh, claim and create all run under the gate. The refresh rotates
         // scnt like any other Apple call, so it must not overlap another
@@ -234,68 +352,82 @@ export async function createICloudAlias(
         // locally instead of each one rediscovering Apple's limit. The refresh
         // still precedes the claim: a stale-session refresh never reaches
         // /email/private/add, so its failures must not spend an hourly slot.
-        const outcome = await withAppleAccountCreateGate(accountId, async (): Promise<
-          { denied: number } | { denied?: undefined; created: AppleAccountAlias; remaining: number }
+        // Every outcome persists its session before the gate opens, so the
+        // request queued next adopts the scnt this one rotated. The counters,
+        // the audit row and the claim settlement are inside too: the gated
+        // operation runs under keepAlive and still commits at Apple after the
+        // client has gone, so its bookkeeping has to come along.
+        const outcome = await withAppleAccountSessionGate(accountId, async (): Promise<
+          { denied: number } | { expired: true } | { created: AppleAccountAlias; remaining: number }
         > => {
-          if (!client.isUsable()) { await client.refresh(); refreshed = true }
-          const claim = await claimICloudAliasCreate(env.DB, user.id, accountId, 'apple_account')
-          if (!claim.allowed) return { denied: claim.retryAfter }
-          claimed = true
-          return { created: await client.createAlias(label), remaining: claim.remaining }
-        })
-        if (outcome.denied !== undefined) {
-          // The refresh already rotated the session upstream; dropping it would
-          // leave a dead scnt in the store and the next call would mark the
-          // account expired.
-          if (refreshed) {
-            account.appleAccountState = client.state; account.appleAccountStatus = 'active'
-            account.appleAccountExpiresAt = client.state.expiresAt; account.appleAccountError = ''
-            await store.saveAppleAccountState(account).catch(() => undefined)
+          const session = await currentAppleSession(store, account)
+          // The inferred channel was chosen from the arrival read. A request
+          // that queued behind one that just found the session dead leaves it
+          // to the cookie jar instead of replaying it at Apple.
+          if (requestedChannel !== 'apple_account' && account.appleAccountStatus === 'expired') return { expired: true }
+          const { client } = session
+          let claimed = false
+          try {
+            if (!client.isUsable()) await client.refresh()
+            const claim = await claimICloudAliasCreate(env.DB, user.id, accountId, 'apple_account')
+            if (!claim.allowed) {
+              // The refresh already rotated the session upstream; dropping it
+              // would leave a dead scnt in the store and the next call would
+              // mark the account expired.
+              if (appleSessionRotated(session)) {
+                await persistAppleSession(store, account, session, { appleAccountStatus: 'active', appleAccountError: '' })
+                  .catch(() => false)
+              }
+              return { denied: claim.retryAfter }
+            }
+            claimed = true
+            const created = await client.createAlias(label)
+            // Apple has committed the alias. Failing to record the rotated
+            // session, the counters (they resync on the next listing) or the
+            // audit row must not turn it into an error the caller would retry,
+            // creating a second alias.
+            await persistAppleSession(store, account, session, { appleAccountStatus: 'active', appleAccountError: '' })
+              .catch(() => false)
+            await store.addAliasSummary(accountId, created.active ? 1 : 0).catch(() => undefined)
+            await writeAudit(env, user.id, 'icloud.alias.create', accountId, ip, auditDetail(account, {
+              alias: created.email, label: created.label, channel: 'apple_account',
+            })).catch((error) => console.error('iCloud alias audit failed after Apple created it', error))
+            return { created, remaining: claim.remaining }
+          } catch (error) {
+            // Persist only values received from successful requests, which
+            // keeps a rotated scnt usable whatever failed after it. A rotation
+            // also means Apple accepted the session: an explicit
+            // channel:'apple_account' bypasses the availability check, so this
+            // runs for rows still marked expired, and leaving them that way
+            // would hide a session Apple just accepted.
+            const remote = error instanceof ICloudRemoteError ? error : undefined
+            if (remote || appleSessionRotated(session)) {
+              await persistAppleSession(store, account, session, {
+                ...(appleSessionRotated(session) ? { appleAccountStatus: 'active', appleAccountError: '' } : {}),
+                ...(remote ? { appleAccountError: remote.message.slice(0, 300), ...expiredPatch(remote) } : {}),
+              }).catch(() => false)
+            }
+            // Settling an unclaimed slot would decrement someone else's
+            // successful create, so only reconcile a reservation this call took.
+            if (claimed) await settleAppleClaim(env, user.id, accountId, error)
+            throw error
           }
+        }, keepAlive)
+        if ('expired' in outcome) {
+          if (!mayFallBack) {
+            throw new ICloudRemoteError(ICLOUD_CREDENTIAL_ERROR_STATUS, account.appleAccountError
+              || 'Apple Account 管理态已失效，请重新导入登录态。', true, APPLE_ACCOUNT_ERROR_CODES.auth)
+          }
+        } else if ('denied' in outcome) {
           if (!mayFallBack) throw new ICloudAliasQuotaError('apple_account', outcome.denied)
         } else {
           const { created, remaining } = outcome
-          account.appleAccountState = client.state; account.appleAccountStatus = 'active'
-          account.appleAccountExpiresAt = client.state.expiresAt; account.appleAccountError = ''
-          await store.saveAppleAccountState(account)
-          await store.addAliasSummary(accountId, created.active ? 1 : 0)
-          await writeAudit(env, user.id, 'icloud.alias.create', accountId, ip, auditDetail(account, {
-            alias: created.email, label: created.label, channel: 'apple_account',
-          }))
           return Response.json({
             alias: { email: created.email, label: created.label, createdAt: created.createdAt },
             channel: 'apple_account', remaining,
           }, { status: 201 })
         }
       } catch (error) {
-        // Settling an unclaimed slot would decrement someone else's successful
-        // create, so only reconcile when a reservation was actually taken.
-        if (claimed) await settleAppleClaim(env, user.id, accountId, error)
-        if (error instanceof ICloudRemoteError && !(error instanceof ICloudAliasQuotaError)) {
-          // Persist only values received from successful requests. This keeps
-          // a refreshed scnt/Cookie usable even when the subsequent create
-          // step is rate-limited or fails validation.
-          account.appleAccountState = client.state
-          account.appleAccountExpiresAt = client.state.expiresAt
-          if (error.code === APPLE_ACCOUNT_ERROR_CODES.auth) account.appleAccountStatus = 'expired'
-          account.appleAccountError = error.message.slice(0, 300)
-          await store.saveAppleAccountState(account).catch(() => undefined)
-        } else if (refreshed && !(error instanceof ICloudAliasQuotaError)) {
-          // A D1 or runtime failure after the refresh would otherwise drop a
-          // scnt Apple has already rotated, and the next create would read as
-          // expired. Quota rejections already persisted above, and re-running
-          // this would cost a second encrypt and a second write for nothing.
-          //
-          // The status matters as much as the state: an explicit
-          // channel:'apple_account' bypasses the availability check, so this
-          // path is reachable for a row still marked expired. Leaving it that
-          // way would keep a session Apple just accepted hidden from the UI.
-          account.appleAccountState = client.state
-          account.appleAccountExpiresAt = client.state.expiresAt
-          account.appleAccountStatus = 'active'
-          account.appleAccountError = ''
-          await store.saveAppleAccountState(account).catch(() => undefined)
-        }
         if (!mayFallBack || !appleAccountFailure(error)) throw error
       }
     }
@@ -395,4 +527,56 @@ export async function getICloudAliasQuota(
     }))
     return Response.json({ channels }, { headers: { 'Cache-Control': 'private, no-store' } })
   } catch (error) { return responseError(error) }
+}
+
+/**
+ * List aliases through the Apple Account session, under the session gate: for
+ * accounts without a cookie jar, and in place of a jar Apple has rejected.
+ * Errors propagate for the caller's handler to answer. Standing in for a
+ * rejected jar (`cookieError`), only a real list helps: any Apple failure, or a
+ * region without the list, answers with the jar's error, since the jar is what
+ * the user has to fix.
+ */
+export function listAppleAccountAliases(
+  store: ICloudAccountStore,
+  account: ICloudAccount,
+  { cookieError, keepAlive }: { cookieError?: ICloudRemoteError; keepAlive?: KeepAlive } = {},
+): Promise<Response> {
+  const listing = withAppleAccountSessionGate(account.id, async () => {
+    const session = await currentAppleSession(store, account)
+    const { client } = session
+    const known = iCloudAliasCounts(account)
+    try {
+      const aliases = await client.listAliases()
+      account.aliasTotal = aliases.length
+      account.aliasActive = aliases.filter((alias) => alias.active).length
+      await Promise.all([
+        persistAppleSession(store, account, session, { appleAccountStatus: 'active', appleAccountError: '' }),
+        store.saveAliasSummary(account, known),
+      ])
+      // The list is real, but the jar still has to be re-imported; say so.
+      return Response.json(cookieError ? { aliases, cookieError: cookieError.message } : { aliases })
+    } catch (error) {
+      if (!(error instanceof ICloudRemoteError)) throw error
+      // A refresh before the listing, or a 200 whose body could not be read,
+      // already rotated scnt upstream; dropping it leaves a dead one stored.
+      if (appleSessionRotated(session) || error.code === APPLE_ACCOUNT_ERROR_CODES.auth) {
+        await persistAppleSession(store, account, session, expiredPatch(error)).catch(() => false)
+      }
+      if (cookieError) throw cookieError
+      // Apple Account management does not expose the legacy HME list in every
+      // region, and creation stays usable without it. Only a missing endpoint
+      // means that; a timeout or an outage still has to reach the user.
+      if (error.code === APPLE_ACCOUNT_ERROR_CODES.unavailable) return Response.json({ aliases: [] })
+      throw error
+    }
+  }, keepAlive)
+  // Whatever else failed on the way (the session removed meanwhile, D1), the
+  // jar is still what the user has to fix; log what was not an expected answer.
+  return cookieError ? listing.catch((error) => {
+    if (!(error instanceof ICloudRemoteError) && !(error instanceof ICloudStoreError)) {
+      console.error('Apple Account listing failed in place of a rejected jar', error)
+    }
+    throw cookieError
+  }) : listing
 }

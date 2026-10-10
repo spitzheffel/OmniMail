@@ -5,7 +5,7 @@ import {
   ICloudRemoteError,
 } from './icloud-apple'
 
-const APPLE_ACCOUNT_REQUEST_TIMEOUT_MS = 20_000
+export const APPLE_ACCOUNT_REQUEST_TIMEOUT_MS = 20_000
 const APPLE_ACCOUNT_ORIGIN = 'https://account.apple.com'
 const APPLE_ACCOUNT_HOST = 'appleid.apple.com'
 const APPLE_ACCOUNT_USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
@@ -87,7 +87,12 @@ function appleAccountResponseText(value: string): string {
   return compact.length > 500 ? `${compact.slice(0, 500)}…` : compact
 }
 
-function appleAccountErrorCode(status: number, text: string): string {
+/**
+ * `optional` marks an endpoint some regions do not serve (the alias list): only
+ * there does a missing endpoint mean `unavailable`. Everywhere else it is a
+ * failure like any other, and the limit wording still wins over it.
+ */
+function appleAccountErrorCode(status: number, text: string, optional = false): string {
   const lower = text.toLowerCase()
   if (status === 419 || status === 401 || status === 403
     || /authentication[_ ]failed|invalid[_ ]session|session[_ ]expired|scnt[_ ]expired/.test(lower)) {
@@ -95,6 +100,9 @@ function appleAccountErrorCode(status: number, text: string): string {
   }
   if (status === 429 || /limit|too many|rate.?limit|quota/.test(lower)) {
     return APPLE_ACCOUNT_ERROR_CODES.limit
+  }
+  if (optional && (status === 404 || status === 405 || status === 410 || status === 501)) {
+    return APPLE_ACCOUNT_ERROR_CODES.unavailable
   }
   return APPLE_ACCOUNT_ERROR_CODES.api
 }
@@ -248,7 +256,7 @@ export class AppleAccountClient {
     method: string,
     path: string,
     body?: unknown,
-    includeApiKey = false,
+    { apiKey: includeApiKey = false, optional = false }: { apiKey?: boolean; optional?: boolean } = {},
   ): Promise<T> {
     if (!path.startsWith('/')) throw new ICloudRemoteError(400, 'Apple Account 请求路径无效。', true, APPLE_ACCOUNT_ERROR_CODES.api)
     const url = ensureAppleAccountUrl(`${appleAccountBase(this.state)}${path}`)
@@ -288,7 +296,7 @@ export class AppleAccountClient {
     }
     const text = await response.text()
     if (!response.ok) {
-      const code = appleAccountErrorCode(response.status, text)
+      const code = appleAccountErrorCode(response.status, text, optional)
       throw new ICloudRemoteError(
         appleAccountErrorStatus(code),
         appleAccountErrorMessage(code, response.status, text),
@@ -321,14 +329,14 @@ export class AppleAccountClient {
       )
     }
     const token = await this.request<{ timeOutInterval?: number | string }>(
-      'GET', '/account/manage/gs/ws/token', undefined, false,
+      'GET', '/account/manage/gs/ws/token',
     )
     const timeoutMinutes = Number(token.timeOutInterval)
     if (Number.isFinite(timeoutMinutes) && timeoutMinutes > 0) {
       this.state.expiresAt = new Date(Date.now() + timeoutMinutes * 60_000).toISOString()
     }
     const manage = await this.request<{ apiKey?: string }>(
-      'GET', '/account/manage', undefined, false,
+      'GET', '/account/manage',
     )
     if (manage.apiKey?.trim()) this.state.apiKey = manage.apiKey.trim()
     if (!this.state.apiKey) {
@@ -346,7 +354,7 @@ export class AppleAccountClient {
   async createAlias(label: string, note = ''): Promise<AppleAccountAlias> {
     if (!appleAccountStateUsable(this.state)) await this.refresh()
     const generated = await this.request<{ emailAddress?: string }>(
-      'POST', '/account/manage/email/private/add', {}, true,
+      'POST', '/account/manage/email/private/add', {}, { apiKey: true },
     )
     const email = generated.emailAddress?.trim().toLowerCase() || ''
     if (!email) {
@@ -359,12 +367,12 @@ export class AppleAccountClient {
       emailAddress: email,
       label: finalLabel,
       note: note.trim(),
-    }, true)
+    }, { apiKey: true })
     let confirmed = completed
     if (completed.id?.trim()) {
       try {
         confirmed = await this.request<typeof completed>(
-          'GET', `/account/manage/email/private/${encodeURIComponent(completed.id.trim())}.em`, undefined, true,
+          'GET', `/account/manage/email/private/${encodeURIComponent(completed.id.trim())}.em`, undefined, { apiKey: true },
         )
       } catch {
         // Creation already succeeded; detail lookup is best effort.
@@ -387,16 +395,16 @@ export class AppleAccountClient {
 
   async listAliases(): Promise<AppleAccountAlias[]> {
     if (!appleAccountStateUsable(this.state)) await this.refresh()
-    const data = await this.request<unknown>('GET', '/account/manage/email/private', undefined, true)
+    const data = await this.request<unknown>('GET', '/account/manage/email/private', undefined, { apiKey: true, optional: true })
     const { rows, found } = aliasArray(data)
     if (!found) {
-      // Reported as an API failure so callers fall back to their "listing
-      // unavailable" path instead of persisting a bogus count of zero.
+      // Reported as an unavailable listing so callers take their "no list
+      // here" path instead of persisting a bogus count of zero.
       throw new ICloudRemoteError(
         502,
         'Apple Account 未返回可识别的隐私邮箱列表。',
         true,
-        APPLE_ACCOUNT_ERROR_CODES.api,
+        APPLE_ACCOUNT_ERROR_CODES.unavailable,
       )
     }
     return rows.map(aliasFromValue).filter((alias): alias is AppleAccountAlias => Boolean(alias))

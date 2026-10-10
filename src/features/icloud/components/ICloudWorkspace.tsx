@@ -97,6 +97,9 @@ export function ICloudWorkspace({ userId, enabled, remoteImagesEnabled }: {
   const [loading, setLoading] = useState(true)
   const [syncing, setSyncing] = useState(false)
   const [error, setError] = useState('')
+  // Kept apart from `error`: the inbox path (loadInbox) supersedes sync's inbox
+  // phase and resets `error`, which must not erase why the alias list is empty.
+  const [aliasError, setAliasError] = useState('')
   const [notice, setNotice] = useState('')
   const [addOpen, setAddOpen] = useState(false)
   const [createOpen, setCreateOpen] = useState(false)
@@ -113,6 +116,7 @@ export function ICloudWorkspace({ userId, enabled, remoteImagesEnabled }: {
   const messageController = useRef<AbortController | null>(null)
   const openDeepLinkMessage = useEffectEvent((message: ICloudMessage) => openMessage(message))
   const selected = accounts.find((account) => account.id === selectedId)
+  const readsMail = Boolean(selected?.hasCookies || selected?.hasAppPassword)
   // hasAppleAccount alone would keep this open for a session Apple has already
   // rejected, and the dialog behind it could then only report an exhausted
   // budget for a window nothing ever spent.
@@ -167,15 +171,30 @@ export function ICloudWorkspace({ userId, enabled, remoteImagesEnabled }: {
     const inboxCurrent = ++inboxRequestId.current
     setSyncing(true); setError('')
     try {
+      // An expired Apple session is still listed: the server says why it fails,
+      // and a listing Apple accepts marks it active again.
       if (selected?.hasCookies || selected?.hasAppleAccount) {
-        const aliasResult = await api.iCloudAliases(id, aliasAbort.signal)
-        if (aliasCurrent !== aliasRequestId.current) return
-        setAliases(aliasResult.aliases)
+        // Aliases and the inbox come from different credentials, so a dead
+        // Apple session or cookie jar must not keep a working inbox from loading.
+        try {
+          const aliasResult = await api.iCloudAliases(id, aliasAbort.signal)
+          if (aliasCurrent !== aliasRequestId.current) return
+          // cookieError: listed through Apple in place of a jar Apple rejected.
+          setAliases(aliasResult.aliases); setAliasError(aliasResult.cookieError || '')
+        } catch (aliasLoadError) {
+          if (aliasCurrent !== aliasRequestId.current) return
+          setAliases([]); setAliasError(errorMessage(aliasLoadError))
+        }
       } else {
-        setAliases([])
+        setAliases([]); setAliasError('')
       }
       await loadAccounts()
       if (aliasCurrent !== aliasRequestId.current || inboxCurrent !== inboxRequestId.current) return
+      // An Apple-Account-only account has nothing to read mail with.
+      if (selected && !readsMail) {
+        setMessages([]); setInboxMethod('')
+        return
+      }
       if (!forceInbox && cached?.fresh) return
       try {
         inboxController.current?.abort()
@@ -204,11 +223,11 @@ export function ICloudWorkspace({ userId, enabled, remoteImagesEnabled }: {
     } finally {
       if (aliasCurrent === aliasRequestId.current && inboxCurrent === inboxRequestId.current) setSyncing(false)
     }
-  }, [loadAccounts, searchQuery, selected?.hasAppleAccount, selected?.hasCookies, selectedAlias, selectedId, userId])
+  }, [loadAccounts, readsMail, searchQuery, selected, selectedAlias, selectedId, userId])
 
   const loadInbox = useCallback(async (force = false) => {
     const id = selectedId
-    if (!id) return
+    if (!id || (selected && !readsMail)) return
     const scope: ICloudInboxScope = {
       userId, accountId: id, alias: selectedAlias, query: searchQuery,
     }
@@ -238,7 +257,7 @@ export function ICloudWorkspace({ userId, enabled, remoteImagesEnabled }: {
         setError(errorMessage(inboxError))
       }
     } finally { if (current === inboxRequestId.current) setSyncing(false) }
-  }, [searchQuery, selectedAlias, selectedId, userId])
+  }, [readsMail, searchQuery, selected, selectedAlias, selectedId, userId])
 
   useEffect(() => activateICloudMailCacheUser(userId), [userId])
   useEffect(() => { void loadAccounts() }, [loadAccounts])
@@ -250,7 +269,7 @@ export function ICloudWorkspace({ userId, enabled, remoteImagesEnabled }: {
     aliasController.current?.abort(); inboxController.current?.abort()
     messageController.current?.abort(); messageRequestId.current += 1
     aliasRequestId.current += 1; inboxRequestId.current += 1
-    setAliases([]); setMessages([]); setInboxMethod(''); setSelectedAlias(''); setOpened(null)
+    setAliases([]); setAliasError(''); setMessages([]); setInboxMethod(''); setSelectedAlias(''); setOpened(null)
   }, [selectedId])
   const syncSelectedAccount = useEffectEvent(() => { if (selectedId) void sync() })
   const loadSelectedInbox = useEffectEvent(() => { if (selectedId) void loadInbox() })
@@ -353,7 +372,7 @@ export function ICloudWorkspace({ userId, enabled, remoteImagesEnabled }: {
             <ListScrollTopHeading title="iCloud" onScrollTop={mailListScroll.scrollToTop} />
           </div>
           <div className="list-header__actions">
-            {selected && <span className={`icloud-mail-status ${selected.hasAppPassword ? 'is-imap' : 'is-cookie'}`}>
+            {selected && readsMail && <span className={`icloud-mail-status ${selected.hasAppPassword ? 'is-imap' : 'is-cookie'}`}>
               {selected.hasAppPassword
                 ? <ShieldCheck size={13} aria-hidden="true" />
                 : <KeyRound size={13} aria-hidden="true" />}
@@ -377,17 +396,21 @@ export function ICloudWorkspace({ userId, enabled, remoteImagesEnabled }: {
           </div>
         </header>
 
-        {selected && (!selectedAlias || selected.hasAppPassword) && <ICloudSearchField
+        {selected && readsMail && (!selectedAlias || selected.hasAppPassword) && <ICloudSearchField
           value={query} loading={syncing} summaryOnly={inboxMethod === 'web'} onChange={setQuery} />}
 
         {error && <p className="list-error" role="alert"><AlertCircle size={15} />{t(error)}</p>}
+        {aliasError && aliasError !== error && <p className="list-error" role="alert"><AlertCircle size={15} />{t(aliasError)}</p>}
         {activeAlias && <div className="icloud-list-context">
           <span><AtSign size={16} /></span>
           <p><strong>{activeAlias.label || t('未命名地址')}</strong><small>{activeAlias.email}</small></p>
           <div>
             <button type="button" onClick={() => void copyAlias(activeAlias.email)} aria-label={t('复制')} data-tooltip={t('复制')}><Copy size={14} /></button>
-            <button type="button" onClick={() => void aliasAction(activeAlias, activeAlias.active ? 'deactivate' : 'reactivate')} aria-label={t(activeAlias.active ? '停用' : '恢复')} data-tooltip={t(activeAlias.active ? '停用' : '恢复')}>{activeAlias.active ? <PowerOff size={14} /> : <Power size={14} />}</button>
-            <button className="is-danger" type="button" onClick={() => void aliasAction(activeAlias, 'delete')} aria-label={t('删除')} data-tooltip={t('删除')}><Trash2 size={14} /></button>
+            {/* Deactivate, reactivate and delete exist only on the cookie channel. */}
+            {selected?.hasCookies && <>
+              <button type="button" onClick={() => void aliasAction(activeAlias, activeAlias.active ? 'deactivate' : 'reactivate')} aria-label={t(activeAlias.active ? '停用' : '恢复')} data-tooltip={t(activeAlias.active ? '停用' : '恢复')}>{activeAlias.active ? <PowerOff size={14} /> : <Power size={14} />}</button>
+              <button className="is-danger" type="button" onClick={() => void aliasAction(activeAlias, 'delete')} aria-label={t('删除')} data-tooltip={t('删除')}><Trash2 size={14} /></button>
+            </>}
           </div>
         </div>}
         {activeMainAddress && <div className="icloud-list-context">
@@ -400,6 +423,7 @@ export function ICloudWorkspace({ userId, enabled, remoteImagesEnabled }: {
         {!enabled ? <Empty icon={<KeyRound size={24} />} title={t('iCloud 功能尚未启用')} description={t('在 Worker Variables & Secrets 中配置至少 32 字节的 MAIL_CREDENTIALS_KEY，然后重新部署。')} />
           : loading ? <div className="icloud-loading"><Spinner size={22} />{t('正在读取 iCloud 账号…')}</div>
           : !accounts.length ? <Empty icon={<Cloud size={24} />} title={t('还没有 iCloud 账号')} description={t('使用应用专用密码即可收取主邮箱；如需管理隐藏邮箱，再添加 Cookie。')} action={<button className="button button--primary" type="button" onClick={() => setAddOpen(true)}><Plus size={16} />{t('添加第一个账号')}</button>} />
+          : selected && !readsMail ? <Empty icon={<KeyRound size={24} />} title={t('需要应用专用密码')} description={t('配置应用专用密码或 Cookie 后才能收取这个账号的邮件。')} action={<button className="button button--secondary button--small" type="button" onClick={() => setCredentials(selected)}>{t('配置应用密码')}</button>} />
           : selectedAlias && !selected?.hasAppPassword ? <Empty icon={<KeyRound size={24} />} title={t('需要应用专用密码')} description={t('配置后才能准确筛选这个隐藏邮箱收到的邮件。')} action={<button className="button button--secondary button--small" type="button" onClick={() => selected && setCredentials(selected)}>{t('配置应用密码')}</button>} />
           : syncing && !messages.length ? <div className="icloud-loading"><Spinner />{t('正在读取收件箱…')}</div>
           : messages.length ? <div className="message-list-shell"><div className="message-list" role="listbox" aria-label={t('iCloud 邮件列表')}>

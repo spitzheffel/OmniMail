@@ -1,6 +1,7 @@
-import { Hono } from 'hono'
+import { Hono, type Context } from 'hono'
 import type { AppContext } from '../../app/context'
 import { clientIp } from '../../shared/http/api-helpers'
+import type { KeepAlive } from './icloud-account-api'
 import {
   startAppleAccountLogin,
   submitAppleAccountLogin2FA,
@@ -26,6 +27,11 @@ import {
 } from './icloud-api'
 
 export const iCloudRoutes = new Hono<AppContext>()
+
+/** Lets an Apple Account call that holds the session gate finish after a disconnect. */
+function keepAlive(context: Context<AppContext>): KeepAlive {
+  return (task) => context.executionCtx.waitUntil(task)
+}
 
 iCloudRoutes.get('/icloud/accounts', (context) => (
   listICloudAccounts(context.env, context.get('user'))
@@ -74,7 +80,7 @@ iCloudRoutes.put('/icloud/accounts/:id/apple-account', (context) => (
   )
 ))
 iCloudRoutes.post('/icloud/accounts/:id/apple-account/refresh', (context) => (
-  refreshICloudAppleAccount(context.env, context.get('user'), context.req.param('id'))
+  refreshICloudAppleAccount(context.env, context.get('user'), context.req.param('id'), keepAlive(context))
 ))
 iCloudRoutes.delete('/icloud/accounts/:id/apple-account', (context) => (
   deleteICloudAppleAccount(
@@ -110,7 +116,7 @@ iCloudRoutes.put('/icloud/accounts/:id/app-password', (context) => (
   )
 ))
 iCloudRoutes.get('/icloud/aliases', (context) => (
-  listICloudAliases(context.env, context.get('user'), context.req.raw)
+  listICloudAliases(context.env, context.get('user'), context.req.raw, keepAlive(context))
 ))
 iCloudRoutes.post('/icloud/aliases', (context) => (
   createICloudAlias(
@@ -118,6 +124,7 @@ iCloudRoutes.post('/icloud/aliases', (context) => (
     context.get('user'),
     context.req.raw,
     clientIp(context.req.raw.headers),
+    keepAlive(context),
   )
 ))
 iCloudRoutes.get('/icloud/aliases/quota', (context) => (

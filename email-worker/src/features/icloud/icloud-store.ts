@@ -4,6 +4,7 @@ import {
   iCloudCredentialsReady,
 } from './icloud-credentials'
 import type {
+  AppleAccountRead,
   ICloudAccount,
   ICloudAccountRow,
   PublicICloudAccount,
@@ -102,6 +103,7 @@ export function publicICloudAccount(account: ICloudAccount): PublicICloudAccount
     cookies,
     appPassword,
     appleAccountState: _appleAccountState,
+    appleAccountRead: _appleAccountRead,
     userId: _userId,
     ...safe
   } = account
@@ -258,6 +260,7 @@ export class ICloudAccountStore {
       appleAccountStatus: row.apple_account_status,
       appleAccountExpiresAt: row.apple_account_expires_at,
       appleAccountError: row.apple_account_error,
+      appleAccountRead: { cipher: row.apple_account_state_cipher, plaintext: appleStateText || '' },
       createdAt: row.created_at,
     }
   }
@@ -404,26 +407,78 @@ export class ICloudAccountStore {
     if (!result.meta.changes) throw new ICloudStoreError(404, 'iCloud 账号不存在。')
   }
 
+  /**
+   * Replace the Apple session outright. Only for a session the user just
+   * supplied (import, sign-in); a request that merely rotated the stored one
+   * goes through advanceAppleAccountState instead.
+   */
   async saveAppleAccountState(account: ICloudAccount): Promise<void> {
-    const cipher = await encryptICloudCredential(
-      this.env,
-      account.appleAccountState ? JSON.stringify(account.appleAccountState) : '',
-      this.context(account.id, 'apple-account'),
-    )
+    if (!await this.writeAppleAccountState(account, null, true)) {
+      throw new ICloudStoreError(404, 'iCloud 账号不存在。')
+    }
+  }
+
+  /**
+   * Persist what a request did with the session it read, but only while the
+   * stored one is still that session. Otherwise something newer landed
+   * meanwhile — another request's rotation, a removal, a fresh sign-in — and
+   * writing this older copy back would undo it, or mark a live session
+   * expired. Returns whether the write happened.
+   *
+   * `rotated` says whether Apple handed the request new session values. When it
+   * did not (typically a call Apple rejected outright), only the status is
+   * written and the ciphertext stays as read: re-encrypting the same session
+   * would draw a fresh IV and look like a newer version, so a stale request
+   * that failed fast would lock out the concurrent one holding the session
+   * Apple actually rotated.
+   */
+  async advanceAppleAccountState(account: ICloudAccount, rotated: boolean): Promise<boolean> {
+    const read = account.appleAccountRead ?? { cipher: '', plaintext: '' }
+    if (await this.writeAppleAccountState(account, read, rotated)) return true
+    // A key migration re-encrypts the same session under a fresh IV. That
+    // looks like a newer version but is not one, so retry against it once.
+    const row = await this.env.DB.prepare(
+      'SELECT apple_account_state_cipher FROM icloud_accounts WHERE id = ? AND user_id = ?',
+    ).bind(account.id, this.userId).first<Pick<ICloudAccountRow, 'apple_account_state_cipher'>>()
+    if (!row || row.apple_account_state_cipher === read.cipher) return false
+    const plaintext = await decryptICloudCredential(
+      this.env, row.apple_account_state_cipher, this.context(account.id, 'apple-account'),
+    ).catch(() => null)
+    if (plaintext !== read.plaintext) return false
+    return this.writeAppleAccountState(account, { cipher: row.apple_account_state_cipher, plaintext }, rotated)
+  }
+
+  private async writeAppleAccountState(
+    account: ICloudAccount,
+    expected: AppleAccountRead | null,
+    rotated: boolean,
+  ): Promise<boolean> {
+    let next = expected
+    if (rotated || !next) {
+      const plaintext = account.appleAccountState ? JSON.stringify(account.appleAccountState) : ''
+      next = {
+        cipher: await encryptICloudCredential(this.env, plaintext, this.context(account.id, 'apple-account')),
+        plaintext,
+      }
+    }
     const result = await this.env.DB.prepare(
       `UPDATE icloud_accounts SET apple_account_state_cipher = ?,
         apple_account_expires_at = ?, apple_account_status = ?, apple_account_error = ?,
-        updated_at = ? WHERE id = ? AND user_id = ?`,
+        updated_at = ? WHERE id = ? AND user_id = ?${expected ? ' AND apple_account_state_cipher = ?' : ''}`,
     ).bind(
-      cipher,
+      next.cipher,
       account.appleAccountExpiresAt || '',
       account.appleAccountStatus || 'none',
       account.appleAccountError || '',
       new Date().toISOString(),
       account.id,
       this.userId,
+      ...(expected ? [expected.cipher] : []),
     ).run()
-    if (!result.meta.changes) throw new ICloudStoreError(404, 'iCloud 账号不存在。')
+    if (!result.meta.changes) return false
+    // Later writes in the same request are measured against this one.
+    account.appleAccountRead = next
+    return true
   }
 
   /**

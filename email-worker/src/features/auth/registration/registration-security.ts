@@ -82,12 +82,16 @@ export async function verifyRegistrationTurnstile(
   }
 }
 
+function bucketKey(policy: RatePolicy): Promise<string> {
+  return sha256(`registration:${policy.scope}\n${policy.value}`)
+}
+
 async function consumeBucket(
   db: D1Database,
   policy: RatePolicy,
   now: number,
 ): Promise<{ allowed: boolean; retryAfter: number }> {
-  const keyHash = await sha256(`registration:${policy.scope}\n${policy.value}`)
+  const keyHash = await bucketKey(policy)
   const resetBefore = now - policy.windowSeconds
   const row = await db.prepare(
     `INSERT INTO registration_attempts (key_hash, attempts, window_started_at)
@@ -111,6 +115,22 @@ async function consumeBucket(
   }
 }
 
+/** The bucket's verdict for one more attempt, without counting it. */
+async function peekBucket(
+  db: D1Database,
+  policy: RatePolicy,
+  now: number,
+): Promise<{ allowed: boolean; retryAfter: number }> {
+  const keyHash = await bucketKey(policy)
+  const row = await db.prepare(
+    'SELECT attempts, window_started_at FROM registration_attempts WHERE key_hash = ?',
+  ).bind(keyHash).first<{ attempts: number; window_started_at: number }>()
+  if (!row || row.window_started_at <= now - policy.windowSeconds || row.attempts < policy.maximum) {
+    return { allowed: true, retryAfter: 0 }
+  }
+  return { allowed: false, retryAfter: Math.max(1, row.window_started_at + policy.windowSeconds - now) }
+}
+
 export async function consumeRegistrationRateLimit(
   db: D1Database,
   ip: string,
@@ -123,6 +143,52 @@ export async function consumeRegistrationRateLimit(
     { scope: 'email-hour', value: email, maximum: 3, windowSeconds: 60 * 60 },
   ]
   for (const policy of policies) {
+    const result = await consumeBucket(db, policy, now)
+    if (!result.allowed) return result
+  }
+  return { allowed: true, retryAfter: 0 }
+}
+
+/**
+ * Each Apple Account sign-in runs a real SRP attempt against Apple, which counts
+ * toward that Apple ID's own lockout and can push 2FA prompts to its owner, and
+ * nothing ties the Apple ID to the caller. Bound it per user and per Apple ID
+ * within that user: a bucket shared across users would let anyone lock another
+ * user out of their own Apple ID. The narrower bucket goes first, so an attempt
+ * it refuses does not also spend the user's allowance.
+ */
+function appleAccountLoginPolicies(userId: string, appleId: string): RatePolicy[] {
+  return [
+    { scope: 'apple-login-appleid-hour', value: `${userId}\n${appleId}`, maximum: 5, windowSeconds: 60 * 60 },
+    { scope: 'apple-login-user-hour', value: userId, maximum: 10, windowSeconds: 60 * 60 },
+  ]
+}
+
+/**
+ * Whether one more sign-in would be allowed, without counting it. Checked before
+ * any request goes to Apple, so a throttled attempt costs nothing upstream; only
+ * an attempt that reaches the SRP round is counted, by the consume below.
+ */
+export async function checkAppleAccountLoginRateLimit(
+  db: D1Database,
+  userId: string,
+  appleId: string,
+  now = Math.floor(Date.now() / 1000),
+): Promise<{ allowed: boolean; retryAfter: number }> {
+  for (const policy of appleAccountLoginPolicies(userId, appleId)) {
+    const result = await peekBucket(db, policy, now)
+    if (!result.allowed) return result
+  }
+  return { allowed: true, retryAfter: 0 }
+}
+
+export async function consumeAppleAccountLoginRateLimit(
+  db: D1Database,
+  userId: string,
+  appleId: string,
+  now = Math.floor(Date.now() / 1000),
+): Promise<{ allowed: boolean; retryAfter: number }> {
+  for (const policy of appleAccountLoginPolicies(userId, appleId)) {
     const result = await consumeBucket(db, policy, now)
     if (!result.allowed) return result
   }

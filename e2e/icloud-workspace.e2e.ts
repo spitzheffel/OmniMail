@@ -240,6 +240,114 @@ test('explains Cookie summary mode before an app-specific password is configured
   await expect(page.getByText('当前显示 iCloud Web 摘要')).toBeVisible()
 })
 
+test('lists aliases of an Apple-Account-only account without reading mail', async ({ page }) => {
+  // No cookie jar and no app password: there is nothing to read mail with, and
+  // deactivate/delete exist only on the cookie channel.
+  const state = await mockICloud(page, { hasAppPassword: false, hasAppleAccount: true, quota: { web: null } })
+  await page.goto('/icloud')
+
+  await expect(page.getByRole('heading', { name: '需要应用专用密码' })).toBeVisible()
+  await expect(page.getByRole('searchbox', { name: '搜索邮件' })).toHaveCount(0)
+  await expect(page.locator('.icloud-mail-status')).toHaveCount(0)
+  await page.getByRole('button', { name: /当前 iCloud.*Personal/ }).click()
+  await page.getByRole('dialog', { name: '选择查看范围' }).getByRole('button', { name: /Shopping/ }).click()
+  await expect(page.getByRole('button', { name: '复制', exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: '停用' })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: '删除', exact: true })).toHaveCount(0)
+  // A forced sync is where the inbox request would go out; the button is
+  // disabled from the click until that sync has finished.
+  const syncButton = page.getByRole('button', { name: '同步' })
+  await syncButton.click()
+  await expect(syncButton).toBeEnabled()
+  await expect(page.getByRole('alert')).toHaveCount(0)
+  expect(state.inboxAliases).toEqual([])
+})
+
+test('still loads the inbox when the alias listing fails', async ({ page }) => {
+  // Aliases and mail come from different credentials.
+  await mockICloud(page, { aliasListError: 'Apple Account 请求失败（HTTP 503）：空响应' })
+  await page.goto('/icloud')
+
+  await expect(page.getByText('Your receipt')).toBeVisible()
+  await expect(page.getByRole('alert')).toContainText('HTTP 503')
+})
+
+test('removes an expired Apple session without signing in again', async ({ page }) => {
+  const state = await mockICloud(page, { hasAppleAccount: true, appleAccountStatus: 'expired' })
+  await page.goto('/icloud')
+
+  await page.getByLabel('账号设置', { exact: true }).click()
+  const settingsDialog = page.getByRole('dialog', { name: '设置 Personal' })
+  await expect(settingsDialog.getByText('需要重新登录')).toBeVisible()
+  await settingsDialog.getByRole('button', { name: '移除 Apple Account' }).click()
+  await expect.poll(() => state.appleAccountDeletes).toEqual(['icloud-1'])
+  await expect(page.locator('.toast')).toHaveText('Apple Account 已移除')
+  await expect(settingsDialog.getByRole('button', { name: '移除 Apple Account' })).toHaveCount(0)
+  // Signing in again, possibly with another Apple ID, stays possible.
+  await expect(settingsDialog.getByRole('button', { name: '连接 Apple Account' })).toBeEnabled()
+})
+
+test('offers sign-in once a manual refresh finds the session rejected', async ({ page }) => {
+  // The server marks the session expired; the dialog must re-read it instead
+  // of offering the same refresh that just failed.
+  await mockICloud(page, { hasAppleAccount: true, rejectAppleRefresh: true })
+  await page.goto('/icloud')
+
+  await page.getByLabel('账号设置', { exact: true }).click()
+  const settingsDialog = page.getByRole('dialog', { name: '设置 Personal' })
+  await settingsDialog.getByRole('button', { name: '刷新登录态' }).click()
+  await expect(settingsDialog.getByText('需要重新登录')).toBeVisible()
+  await expect(settingsDialog.getByRole('button', { name: '连接 Apple Account' })).toBeEnabled()
+  await expect(settingsDialog.getByRole('alert')).toContainText('Apple Account 管理态已失效')
+})
+
+test('keeps the alias error when a search takes over loading the inbox', async ({ page }) => {
+  // The search runs its own inbox load, which resets the inbox error; the
+  // alias failure the sync caught still explains why the alias list is empty.
+  const state = await mockICloud(page, { aliasListError: 'Apple Account 请求失败（HTTP 503）：空响应' })
+  await page.goto('/icloud')
+  await expect(page.getByRole('alert')).toContainText('HTTP 503')
+
+  await page.getByRole('searchbox', { name: '搜索邮件' }).fill('receipt')
+  await expect.poll(() => state.inboxQueries.at(-1)).toBe('receipt')
+  // The sync button stays disabled until that inbox load has finished.
+  await expect(page.getByRole('button', { name: '同步' })).toBeEnabled()
+  await expect(page.getByText('Your receipt')).toBeVisible()
+  await expect(page.getByRole('alert')).toContainText('HTTP 503')
+})
+
+test('lists an expired Apple-only session so its rejection is shown', async ({ page }) => {
+  await mockICloud(page, {
+    hasAppPassword: false, hasAppleAccount: true, appleAccountStatus: 'expired', quota: { web: null },
+    aliasListError: 'Apple Account 管理态已失效，请重新导入登录态。',
+  })
+  await page.goto('/icloud')
+
+  await expect(page.getByRole('alert')).toContainText('Apple Account 管理态已失效')
+})
+
+test('says the jar is dead when aliases come through the Apple session instead', async ({ page }) => {
+  await mockICloud(page, {
+    hasAppleAccount: true, aliasListCookieError: 'iCloud Cookie 已失效，或账号未开通 iCloud+、没有 Hide My Email 权限。',
+  })
+  await page.goto('/icloud')
+
+  await expect(page.getByRole('alert')).toContainText('iCloud Cookie 已失效')
+  await expect(page.getByText('Your receipt')).toBeVisible()
+})
+
+test('shows a failed account reload during sync', async ({ page }) => {
+  const state = await mockICloud(page)
+  await page.goto('/icloud')
+  await expect(page.getByText('Your receipt')).toBeVisible()
+
+  state.failAccountLoads()
+  const syncButton = page.getByRole('button', { name: '同步' })
+  await syncButton.click()
+  await expect(syncButton).toBeEnabled()
+  await expect(page.getByRole('alert')).toContainText('读取 iCloud 账号失败。')
+})
+
 test('creates five labeled Hide My Email addresses in one batch', async ({ page }) => {
   const state = await mockICloud(page)
   await page.goto('/icloud')

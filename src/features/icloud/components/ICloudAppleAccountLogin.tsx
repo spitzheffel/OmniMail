@@ -58,13 +58,18 @@ export function ICloudAppleAccountLogin({ account, onChanged, onNotice }: {
   async function refresh() {
     setBusy('refresh'); setError('')
     try { await api.refreshICloudAppleAccount(account.id); await onChanged(); onNotice(t('Apple Account 登录态已刷新')) }
-    catch (refreshError) { setError(errorMessage(refreshError)) } finally { setBusy('') }
+    catch (refreshError) {
+      setError(errorMessage(refreshError))
+      // A failed refresh may still have stored a rotated scnt or marked the
+      // session expired; re-read it so the dialog offers the right actions.
+      await onChanged().catch(() => undefined)
+    } finally { setBusy('') }
   }
 
   async function remove() {
     setBusy('delete'); setError('')
     try { await api.deleteICloudAppleAccount(account.id); await onChanged(); onNotice(t('Apple Account 已移除')) }
-    catch (deleteError) { setError(errorMessage(deleteError)); setBusy('') }
+    catch (deleteError) { setError(errorMessage(deleteError)) } finally { setBusy('') }
   }
 
   const connected = account.hasAppleAccount && account.appleAccountStatus === 'active'
@@ -98,7 +103,13 @@ export function ICloudAppleAccountLogin({ account, onChanged, onNotice }: {
         <label><span>{t('Apple ID 密码')}</span><input type="password" value={password} required autoComplete="current-password"
           onChange={(event) => setPassword(event.target.value)} /></label>
         <p className="icloud-form-note"><ShieldCheck size={15} />{t('密码只用于本次登录请求，不会保存或回传。')}</p>
-        <button className="button button--secondary" disabled={busy === 'login'}>{busy === 'login' ? <Spinner /> : <KeyRound size={15} />}{t('连接 Apple Account')}</button>
+        <div className="icloud-apple-account-actions">
+          <button className="button button--secondary" disabled={Boolean(busy)}>{busy === 'login' ? <Spinner /> : <KeyRound size={15} />}{t('连接 Apple Account')}</button>
+          {/* A dead session can be dropped without signing in again first. */}
+          {account.hasAppleAccount && <button className="button icloud-danger-button" type="button" disabled={Boolean(busy)} onClick={() => void remove()}>
+            {busy === 'delete' ? <Spinner /> : <Trash2 size={15} />}{t('移除 Apple Account')}
+          </button>}
+        </div>
       </form>}
       {error && <p className="inline-error" role="alert"><AlertCircle size={15} />{t(error)}</p>}
     </section>

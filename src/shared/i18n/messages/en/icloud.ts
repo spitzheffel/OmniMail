@@ -259,4 +259,6 @@ export const enICloud: Record<string, string> = {
     'This hour\'s Apple Account creation budget is used up. Try again later.',
   '本小时 iCloud Cookie 创建额度已用完，请稍后再试。':
     'This hour\'s iCloud cookie creation budget is used up. Try again later.',
+  'Apple ID 登录尝试过于频繁，请稍后再试。': 'Too many Apple ID sign-in attempts. Try again later.',
+  '配置应用专用密码或 Cookie 后才能收取这个账号的邮件。': 'Configure an app-specific password or cookies to receive this account\'s mail.',
 }

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { Env, SessionUser } from '../../../app/types'
 import { getMailCredentialMigration, postMailCredentialMigration } from './mail-credential-api'
+import { mailCredentialFields } from './mail-credential-fields'
 import { parseMigrationRequest } from './mail-credential-migration'
 
 const keyId = '0123456789abcdef0123456789abcdef'
@@ -24,7 +25,8 @@ describe('主管理员迁移入口', () => {
   })
   it.each([
     null, [], {}, { keyId }, { keyId, confirm: false }, { keyId, confirm: true, secret: 'should-not-be-accepted' },
-    { keyId, confirm: true, cursor: { field: 11, afterId: '' } },
+    // 越界游标：取目录长度，新增字段时不会让这条用例悄悄变成合法游标。
+    { keyId, confirm: true, cursor: { field: mailCredentialFields.length, afterId: '' } },
     { keyId, confirm: true, cursor: { field: 0.5, afterId: '' } },
     { keyId, confirm: true, cursor: { field: 0, afterId: 'a'.repeat(255) } },
     { keyId, confirm: true, cursor: { field: 0, afterId: '\n' } },

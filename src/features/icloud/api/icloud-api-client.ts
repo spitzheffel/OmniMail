@@ -68,7 +68,7 @@ export function createICloudApi(request: Request, jsonBody: (value: unknown) => 
       `/api/icloud/accounts/${encodeURIComponent(id)}/apple-account`,
       { method: 'DELETE' },
     ),
-    iCloudAliases: (accountId: string, signal?: AbortSignal) => request<{ aliases: ICloudAlias[] }>(
+    iCloudAliases: (accountId: string, signal?: AbortSignal) => request<{ aliases: ICloudAlias[]; cookieError?: string }>(
       `/api/icloud/aliases?accountId=${encodeURIComponent(accountId)}`,
       { signal },
     ),

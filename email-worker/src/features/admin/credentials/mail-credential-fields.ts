@@ -21,4 +21,6 @@ export const mailCredentialFields: readonly MailCredentialField[] = [
   { provider: 'QQ Mail', table: 'qq_mail_accounts', column: 'authorization_code_cipher', purpose: 'qq-authorization-code', key: 'QQ_MAIL_CREDENTIALS_KEY' },
   { provider: 'NAVER Mail', table: 'naver_mail_accounts', column: 'app_password_cipher', purpose: 'naver-app-password', key: 'NAVER_MAIL_CREDENTIALS_KEY' },
   { provider: 'Yandex Mail', table: 'yandex_mail_accounts', column: 'app_password_cipher', purpose: 'yandex-app-password', key: 'YANDEX_MAIL_CREDENTIALS_KEY' },
+  // 追加在末尾：迁移游标按下标记录字段，插在中间会让进行中的迁移跳到别的字段。
+  { provider: 'iCloud', table: 'icloud_accounts', column: 'apple_account_state_cipher', purpose: 'apple-account', key: 'ICLOUD_CREDENTIALS_KEY' },
 ]

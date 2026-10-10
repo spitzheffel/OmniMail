@@ -1,3 +1,7 @@
+import {
+  checkAppleAccountLoginRateLimit,
+  consumeAppleAccountLoginRateLimit,
+} from '../auth/registration/registration-security'
 import { decryptICloudSecret, encryptICloudSecret } from './icloud-credentials'
 import { ICloudAccountStore, ICloudStoreError, publicICloudAccount } from './icloud-store'
 import { AppleAccountClient } from './icloud-account-client'
@@ -309,6 +313,13 @@ function stateFromPending(session: PendingAuthState): AppleAccountState {
   }
 }
 
+function tooManyAppleLogins(retryAfter: number): Response {
+  return Response.json(
+    { error: 'Apple ID 登录尝试过于频繁，请稍后再试。', retryAfter },
+    { status: 429, headers: { 'Retry-After': String(retryAfter) } },
+  )
+}
+
 export async function startAppleAccountLogin(
   env: Env,
   user: SessionUser,
@@ -323,6 +334,8 @@ export async function startAppleAccountLogin(
     if (!appleId || !password) throw new ICloudStoreError(400, '请填写 Apple ID 和密码。')
     const store = new ICloudAccountStore(env, user.id)
     await store.get(accountId)
+    const precheck = await checkAppleAccountLoginRateLimit(env.DB, user.id, appleId)
+    if (!precheck.allowed) return tooManyAppleLogins(precheck.retryAfter)
     const session: PendingAuthState = {
       appleId, frameId: crypto.randomUUID().replaceAll('-', ''), cookies: {}, scnt: '', sessionId: '',
       authAttributes: '', hcBits: 0, hcChallenge: '', twoFactorMethod: method,
@@ -340,6 +353,11 @@ export async function startAppleAccountLogin(
     await first.text()
     await appleRequest(session, 'POST', '/verify/device/key/challenge', { passkeyAutofill: false })
     await appleRequest(session, 'POST', '/federate?isRememberMeEnabled=true', { accountName: appleId, rememberMe: true })
+    // Charged here, right before the SRP round that counts toward the Apple
+    // ID's lockout: warm-up failures above never reach it. The check up front
+    // already refused a spent allowance; this catches attempts that raced it.
+    const limit = await consumeAppleAccountLoginRateLimit(env.DB, user.id, appleId)
+    if (!limit.allowed) return tooManyAppleLogins(limit.retryAfter)
     const secret = srpSecret()
     const init = await appleRequest(session, 'POST', '/signin/init', {
       a: base64(srpPublic(secret)),

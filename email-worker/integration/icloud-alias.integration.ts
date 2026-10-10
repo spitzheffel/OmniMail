@@ -16,6 +16,7 @@ import { encryptICloudCredential } from '../src/features/icloud/icloud-credentia
 import { ICloudAccountStore, iCloudAliasChannels } from '../src/features/icloud/icloud-store'
 import type { AppleAccountState, ICloudAccount, ICloudAlias } from '../src/features/icloud/icloud-types'
 import type { SessionUser } from '../src/app/types'
+import { failingDb, racingDb } from './icloud-test-db'
 
 /*
  * The account store and the alias handlers' failure paths, against a real D1.
@@ -60,28 +61,6 @@ function storeStore(): ICloudAccountStore {
 
 function listed(id: string) {
   return storeStore().list().then((items) => items.find((item) => item.id === id))
-}
-
-/**
- * Run `before` between the bind and the run of the first prepared statement
- * matching `needle`. The store only ever calls .bind().run() on the statement
- * we intercept, so the narrow stand-in is enough.
- */
-function racingDb(db: D1Database, needle: string, before: () => Promise<unknown>): D1Database {
-  let armed = true
-  return {
-    prepare(sql: string) {
-      const statement = db.prepare(sql)
-      if (!armed || !sql.includes(needle)) return statement
-      armed = false
-      return {
-        bind: (...args: unknown[]) => {
-          const bound = statement.bind(...args)
-          return { run: async () => { await before(); return bound.run() } } as D1PreparedStatement
-        },
-      } as D1PreparedStatement
-    },
-  } as D1Database
 }
 
 /** A store whose first statement matching `needle` lets `before` land first. */
@@ -337,17 +316,6 @@ async function appleRefreshOnly(input: RequestInfo | URL): Promise<Response> {
     return new Response('{"apiKey":"api-fresh"}', { headers: { scnt: 'scnt-manage' } })
   }
   return new Response('', { status: 404 })
-}
-
-/** Make every statement touching `needle` fail, as a D1 outage would. */
-function failingDb(db: D1Database, needle: string): D1Database {
-  return {
-    prepare(sql: string) {
-      if (!sql.includes(needle)) return db.prepare(sql)
-      const boom = async () => { throw new Error('D1_ERROR: database is unavailable') }
-      return { bind: () => ({ first: boom, run: boom, all: boom }) } as unknown as D1PreparedStatement
-    },
-  } as D1Database
 }
 
 function appleStatus(accountId: string): Promise<{ apple_account_status: string } | null> {

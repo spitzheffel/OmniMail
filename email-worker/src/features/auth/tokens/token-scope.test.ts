@@ -79,6 +79,7 @@ describe('device token scopes', () => {
       ['/api/icloud/accounts/account-1/apple-account/login/2fa', 'POST'],
       ['/api/icloud/accounts/account-1/apple-account', 'DELETE'],
       ['/api/icloud/aliases', 'GET'],
+      ['/api/icloud/aliases/quota', 'GET'],
       ['/api/icloud/aliases/preview', 'POST'],
       ['/api/icloud/aliases', 'POST'],
       ['/api/icloud/aliases/alias-1', 'PATCH'],
@@ -162,6 +163,11 @@ describe('device token scopes', () => {
     await expect(deviceScopesAllow(
       EXTENSION_DEVICE_SCOPES,
       request('/api/icloud/aliases?accountId=icloud-1'),
+    )).resolves.toBe(true)
+    // The quota a create spends is readable by any token that may create.
+    await expect(deviceScopesAllow(
+      EXTENSION_DEVICE_SCOPES,
+      request('/api/icloud/aliases/quota?accountId=icloud-1'),
     )).resolves.toBe(true)
     await expect(deviceScopesAllow(
       EXTENSION_DEVICE_SCOPES,

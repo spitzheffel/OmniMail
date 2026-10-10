@@ -14,6 +14,16 @@ export interface AppleAccountState {
   origin: string
 }
 
+/**
+ * The Apple session as a request read it. The ciphertext doubles as a version
+ * because every encryption draws a fresh IV; the plaintext tells a pure
+ * re-encryption (a key migration) apart from a newer session.
+ */
+export interface AppleAccountRead {
+  cipher: string
+  plaintext: string
+}
+
 export interface ICloudAccount {
   id: string
   userId: string
@@ -32,6 +42,8 @@ export interface ICloudAccount {
   appleAccountStatus?: AppleAccountStatus
   appleAccountExpiresAt?: string
   appleAccountError?: string
+  /** How the session above was stored when read. Server-only; never part of a response. */
+  appleAccountRead?: AppleAccountRead
   createdAt: string
 }
 
@@ -58,7 +70,7 @@ export interface ICloudAccountRow {
 
 export type PublicICloudAccount = Omit<
   ICloudAccount,
-  'cookies' | 'appPassword' | 'appleAccountState' | 'userId'
+  'cookies' | 'appPassword' | 'appleAccountState' | 'appleAccountRead' | 'userId'
 > & {
   hasCookies: boolean
   hasAppPassword: boolean
