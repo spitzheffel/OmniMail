@@ -46,8 +46,12 @@ export const iCloudEndpoints: ApiEndpoint[] = [
     method: 'PUT', path: '/api/icloud/accounts/:id/apple-account', group: 'icloud', auth: 'authenticated',
     title: l('导入 Apple Account 管理态', 'Import Apple Account management state'),
     description: l('验证并加密保存 Apple Account 的 Cookie、scnt 和动态 apiKey。', 'Validate and encrypt Apple Account cookies, scnt, and dynamic apiKey.'),
-    request: 'Path · id; JSON · state={ cookies, scnt, apiKey, sessionId?, expiresAt? }', response: '200 · { account }',
+    request: 'Path · id; JSON · state={ cookies, scnt, apiKey, sessionId?, expiresAt?, appleId? }', response: '200 · { account }',
     exampleBody: { state: { cookies: { myacinfo: 'cookie-value' }, scnt: 'scnt-value', apiKey: 'api-key-value' } },
+    notes: [l(
+      '给出 appleId 时会核对归属：与该账号已登录或 Cookie 所属的 Apple ID 不同，或已被你的另一个 iCloud 账号使用，返回 409。',
+      'With appleId, ownership is checked: an Apple ID other than the one the account already signed in as or its cookies belong to, or one another of your iCloud accounts uses, answers 409.',
+    )],
   },
   {
     method: 'POST', path: '/api/icloud/accounts/:id/apple-account/refresh', group: 'icloud', auth: 'authenticated',
@@ -64,23 +68,56 @@ export const iCloudEndpoints: ApiEndpoint[] = [
   {
     method: 'POST', path: '/api/icloud/accounts/:id/apple-account/login/start', group: 'icloud', auth: 'authenticated',
     title: l('开始 Apple Account 登录', 'Start Apple Account sign-in'),
-    description: l('使用 Apple ID 和密码启动管理态登录；密码只用于本次请求。', 'Start management sign-in with an Apple ID and password; the password is used only for this request.'),
-    request: 'Path · id; JSON · appleId, password', response: '200 · { needs2FA, challengeId?, expiresAt? }',
+    description: l(
+      '使用 Apple ID（邮箱或手机号）和密码启动管理态登录；密码只用于本次请求。需要双重认证时返回验证码去向：受信任设备，或没有受信任设备、推送失败时的短信。',
+      'Start management sign-in with an Apple ID (email or phone number) and password; the password is used only for this request. When two-factor authentication is needed, the response says where the code went: trusted devices, or SMS when there are none or the push failed.',
+    ),
+    request: 'Path · id; JSON · appleId, password, twoFactorMethod?=trusted_device|phone',
+    response: '200 · { needs2FA: false, account } | { needs2FA: true, challengeId, expiresAt, method=trusted_device|phone, phones: [{ id, number }], phoneId? }',
     exampleBody: { appleId: 'owner@example.com', password: 'never-log-this' },
-    notes: [l('不要向非自有 OmniMail 实例提交 Apple ID 密码。', 'Never submit an Apple ID password to an OmniMail instance you do not control.')],
+    notes: [
+      l('不要向非自有 OmniMail 实例提交 Apple ID 密码。', 'Never submit an Apple ID password to an OmniMail instance you do not control.'),
+      l(
+        '同一用户每个 Apple ID 每小时 5 次、每个用户每小时 10 次，超出返回 429 和 Retry-After；Apple ID 与账号已绑定的不一致或已被另一个账号使用时返回 409。',
+        'Each user may try an Apple ID 5 times and sign in 10 times per hour; beyond that the answer is 429 with Retry-After. An Apple ID that differs from the one bound to the account, or that another account uses, answers 409.',
+      ),
+    ],
+  },
+  {
+    method: 'POST', path: '/api/icloud/accounts/:id/apple-account/login/sms', group: 'icloud', auth: 'authenticated',
+    title: l('改用短信接收验证码', 'Get the verification code by SMS'),
+    description: l(
+      '把等待验证码的登录改为短信接收，或重新发送短信；phoneId 取自开始登录时返回的 phones，省略时用第一个。',
+      'Switch a sign-in waiting for its code to SMS, or send the SMS again; phoneId comes from the phones the start returned, the first one when omitted.',
+    ),
+    request: 'Path · id; JSON · challengeId, phoneId?',
+    response: '200 · { needs2FA: true, challengeId, expiresAt, method=phone, phones, phoneId }',
+    exampleBody: { challengeId: 'challenge_id', phoneId: 1 },
+    notes: [l(
+      '与提交验证码共用每个挑战 5 次的尝试次数。',
+      'Shares the 5 attempts each challenge allows with code submissions.',
+    )],
   },
   {
     method: 'POST', path: '/api/icloud/accounts/:id/apple-account/login/2fa', group: 'icloud', auth: 'authenticated',
     title: l('完成 Apple Account 二次验证', 'Complete Apple Account two-factor sign-in'),
-    description: l('提交受信任设备的 6 位验证码并保存管理态。', 'Submit the six-digit trusted-device code and save the management state.'),
+    description: l('提交受信任设备或短信收到的 6 位验证码并保存管理态。', 'Submit the six-digit code from the trusted device or SMS and save the management state.'),
     request: 'Path · id; JSON · challengeId, code', response: '200 · { needs2FA: false, account }',
     exampleBody: { challengeId: 'challenge_id', code: '123456' },
+    notes: [l(
+      '验证码错误返回 422，可重试；挑战过期（410）或 5 次尝试用完（429）时响应带 code=apple_login_challenge_gone，需要重新开始登录。',
+      'A wrong code answers 422 and may be retried; an expired challenge (410) or one out of its 5 attempts (429) answers with code=apple_login_challenge_gone, and the sign-in has to start over.',
+    )],
   },
   {
     method: 'GET', path: '/api/icloud/aliases', group: 'icloud', auth: 'authenticated',
     title: l('同步隐藏邮箱地址', 'Sync Hide My Email aliases'),
     description: l('从 Apple 读取指定账户的全部隐藏邮箱地址并刷新 Cookie。', 'Read all Hide My Email aliases for an account from Apple and refresh cookies.'),
-    request: 'Query · accountId', response: '200 · { aliases }',
+    request: 'Query · accountId', response: '200 · { aliases, cookieError? }',
+    notes: [l(
+      'Cookie 被 Apple 拒绝而 Apple Account 仍可用时，改经 Apple Account 列出地址，并在 cookieError 中说明 Cookie 需要更新。',
+      'When Apple rejects the cookies but the Apple Account session still works, the list comes through Apple Account and cookieError says the cookies need replacing.',
+    )],
     examplePath: '/api/icloud/aliases?accountId=icloud_account_id',
   },
   {
@@ -104,6 +141,16 @@ export const iCloudEndpoints: ApiEndpoint[] = [
     request: 'JSON · accountId, label?, channel?=apple_account|icloud_web, email?, previewId?',
     response: '201 · { alias, channel, remaining }',
     exampleBody: { accountId: 'icloud_account_id', label: 'Shopping', channel: 'apple_account' },
+    notes: [
+      l(
+        '每个账号每条通道按整点小时计额（Apple Account 20、Cookie 5）；用完返回 429 与 Retry-After，正文为 { error, code=icloud_alias_hourly_quota, channel, retryAfter }。',
+        'Each channel of each account has an hourly budget (Apple Account 20, cookies 5) that resets on the hour; once spent the answer is 429 with Retry-After and the body { error, code=icloud_alias_hourly_quota, channel, retryAfter }.',
+      ),
+      l(
+        '指定 channel 时只走该通道；省略时优先 Apple Account，仅在其达到 Apple 上限时改用 Cookie。已失效的 Apple Account 直接返回 422，不再请求 Apple。',
+        'With channel set, only that channel is used; without it Apple Account goes first and cookies take over only when Apple caps it. An expired Apple Account answers 422 without calling Apple.',
+      ),
+    ],
   },
   {
     method: 'PATCH', path: '/api/icloud/aliases/:anonymousId', group: 'icloud', auth: 'authenticated',

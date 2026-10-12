@@ -56,8 +56,8 @@ jobs:
           fi
 
           if [ "$GITHUB_EVENT_NAME" = "push" ]; then
-            git fetch origin main:refs/remotes/origin/main
-            git merge-base --is-ancestor "${RELEASE_TAG}^{commit}" origin/main
+            git fetch origin develop:refs/remotes/origin/develop
+            git merge-base --is-ancestor "${RELEASE_TAG}^{commit}" origin/develop
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "version_code=$VERSION_CODE" >> "$GITHUB_OUTPUT"

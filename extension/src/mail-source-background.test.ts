@@ -79,6 +79,26 @@ describe('Float mail source background adapters', () => {
     expect(result.upgradeRequired).toBe(false)
   })
 
+  it('never offers the iCloud region host as an address to copy or fill', async () => {
+    const request = vi.fn(async (path: string) => {
+      if (path !== '/api/icloud/accounts') throw new Error(`unexpected path ${path}`)
+      return { accounts: [
+        { id: 'cookie', name: 'Cookie', realEmail: 'owner@icloud.com', icloudEmail: '',
+          host: 'icloud.com', status: 'active', hasCookies: true },
+        { id: 'apple-only', name: 'Apple only', realEmail: '', icloudEmail: '',
+          host: 'icloud.com', status: 'active', hasAppleAccount: true, appleAccountStatus: 'active' },
+      ] }
+    })
+    const result = await discoverMailSources(request, config({
+      iCloudEnabled: true, iCloudWorkspaceEnabled: true,
+    }), [])
+    expect(result.sources.find(({ id }) => id === 'icloud')?.accounts
+      .map(({ id, email }) => ({ id, email }))).toEqual([
+      { id: 'cookie', email: 'owner@icloud.com' },
+      { id: 'apple-only', email: '' },
+    ])
+  })
+
   it('normalizes list and detail calls through the selected fixed adapter', async () => {
     const summary = {
       id: 'message-1',

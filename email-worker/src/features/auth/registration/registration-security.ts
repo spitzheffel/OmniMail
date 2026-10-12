@@ -25,6 +25,8 @@ interface RatePolicy {
   windowSeconds: number
 }
 
+type RateVerdict = { allowed: boolean; retryAfter: number }
+
 export type TurnstileResult = 'valid' | 'invalid' | 'unavailable'
 
 export function registrationProtectionReady(env: Env): boolean {
@@ -90,7 +92,7 @@ async function consumeBucket(
   db: D1Database,
   policy: RatePolicy,
   now: number,
-): Promise<{ allowed: boolean; retryAfter: number }> {
+): Promise<RateVerdict> {
   const keyHash = await bucketKey(policy)
   const resetBefore = now - policy.windowSeconds
   const row = await db.prepare(
@@ -120,7 +122,7 @@ async function peekBucket(
   db: D1Database,
   policy: RatePolicy,
   now: number,
-): Promise<{ allowed: boolean; retryAfter: number }> {
+): Promise<RateVerdict> {
   const keyHash = await bucketKey(policy)
   const row = await db.prepare(
     'SELECT attempts, window_started_at FROM registration_attempts WHERE key_hash = ?',
@@ -131,22 +133,30 @@ async function peekBucket(
   return { allowed: false, retryAfter: Math.max(1, row.window_started_at + policy.windowSeconds - now) }
 }
 
+/** Ask each bucket in order and stop at the first refusal, leaving the later ones uncounted. */
+async function firstRefusal(
+  policies: RatePolicy[],
+  check: (policy: RatePolicy) => Promise<RateVerdict>,
+): Promise<RateVerdict> {
+  for (const policy of policies) {
+    const result = await check(policy)
+    if (!result.allowed) return result
+  }
+  return { allowed: true, retryAfter: 0 }
+}
+
 export async function consumeRegistrationRateLimit(
   db: D1Database,
   ip: string,
   email: string,
   now = Math.floor(Date.now() / 1000),
-): Promise<{ allowed: boolean; retryAfter: number }> {
+): Promise<RateVerdict> {
   const policies: RatePolicy[] = [
     { scope: 'ip-day', value: ip, maximum: 10, windowSeconds: 24 * 60 * 60 },
     { scope: 'ip-hour', value: ip, maximum: 3, windowSeconds: 60 * 60 },
     { scope: 'email-hour', value: email, maximum: 3, windowSeconds: 60 * 60 },
   ]
-  for (const policy of policies) {
-    const result = await consumeBucket(db, policy, now)
-    if (!result.allowed) return result
-  }
-  return { allowed: true, retryAfter: 0 }
+  return firstRefusal(policies, (policy) => consumeBucket(db, policy, now))
 }
 
 /**
@@ -174,12 +184,8 @@ export async function checkAppleAccountLoginRateLimit(
   userId: string,
   appleId: string,
   now = Math.floor(Date.now() / 1000),
-): Promise<{ allowed: boolean; retryAfter: number }> {
-  for (const policy of appleAccountLoginPolicies(userId, appleId)) {
-    const result = await peekBucket(db, policy, now)
-    if (!result.allowed) return result
-  }
-  return { allowed: true, retryAfter: 0 }
+): Promise<RateVerdict> {
+  return firstRefusal(appleAccountLoginPolicies(userId, appleId), (policy) => peekBucket(db, policy, now))
 }
 
 export async function consumeAppleAccountLoginRateLimit(
@@ -187,12 +193,8 @@ export async function consumeAppleAccountLoginRateLimit(
   userId: string,
   appleId: string,
   now = Math.floor(Date.now() / 1000),
-): Promise<{ allowed: boolean; retryAfter: number }> {
-  for (const policy of appleAccountLoginPolicies(userId, appleId)) {
-    const result = await consumeBucket(db, policy, now)
-    if (!result.allowed) return result
-  }
-  return { allowed: true, retryAfter: 0 }
+): Promise<RateVerdict> {
+  return firstRefusal(appleAccountLoginPolicies(userId, appleId), (policy) => consumeBucket(db, policy, now))
 }
 
 export async function consumeTemporaryInviteRateLimit(
@@ -200,15 +202,11 @@ export async function consumeTemporaryInviteRateLimit(
   ip: string,
   inviteId: string,
   now = Math.floor(Date.now() / 1000),
-): Promise<{ allowed: boolean; retryAfter: number }> {
+): Promise<RateVerdict> {
   const policies: RatePolicy[] = [
     { scope: 'invite-ip-hour', value: ip, maximum: 10, windowSeconds: 60 * 60 },
     { scope: 'invite-ip-day', value: ip, maximum: 30, windowSeconds: 24 * 60 * 60 },
     { scope: 'invite-token-hour', value: inviteId, maximum: 10, windowSeconds: 60 * 60 },
   ]
-  for (const policy of policies) {
-    const result = await consumeBucket(db, policy, now)
-    if (!result.allowed) return result
-  }
-  return { allowed: true, retryAfter: 0 }
+  return firstRefusal(policies, (policy) => consumeBucket(db, policy, now))
 }

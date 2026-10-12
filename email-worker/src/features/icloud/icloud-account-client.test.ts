@@ -4,7 +4,6 @@ import {
   ICloudRemoteError,
 } from './icloud-apple'
 import { AppleAccountClient } from './icloud-account-client'
-import { withAppleAccountSessionGate } from './icloud-account-api'
 import type { AppleAccountState } from './icloud-types'
 
 afterEach(() => vi.restoreAllMocks())
@@ -60,14 +59,24 @@ describe('Apple Account private email client', () => {
   })
 
   it('keeps refreshed credentials out of a failed write response', async () => {
+    // The refusal carries new session values of its own; adopting them would
+    // overwrite a session that still works with values from a failure.
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      new Response('{"error":"limit"}', { status: 429 }),
+      new Response('{"error":"limit"}', {
+        status: 429,
+        headers: {
+          scnt: 'scnt-from-failure',
+          'X-Apple-ID-Session-Id': 'session-from-failure',
+          'set-cookie': 'session=from-failure; Path=/',
+        },
+      }),
     )
     const client = new AppleAccountClient(state())
     await expect(client.createAlias('Shop')).rejects.toMatchObject({
       status: 429, code: APPLE_ACCOUNT_ERROR_CODES.limit,
     })
     expect(client.state.scnt).toBe('scnt-old')
+    expect(client.state.sessionId).toBe('session-old')
     expect(client.state.cookies).toEqual({ session: 'cookie-value' })
     expect(fetchMock).toHaveBeenCalledOnce()
   })
@@ -97,18 +106,9 @@ describe('Apple Account private email client', () => {
     await expect(client.createAlias('Shop')).rejects.toBeInstanceOf(ICloudRemoteError)
   })
 
-  it('serializes concurrent creates for the same account', async () => {
-    const order: string[] = []
-    const first = withAppleAccountSessionGate('same-account', async () => {
-      order.push('first-start')
-      await new Promise((resolve) => setTimeout(resolve, 5))
-      order.push('first-end')
-    })
-    const second = withAppleAccountSessionGate('same-account', async () => {
-      order.push('second-start')
-    })
-    await Promise.all([first, second])
-    expect(order).toEqual(['first-start', 'first-end', 'second-start'])
+  it('keeps the Apple ID the session signed in as', () => {
+    expect(new AppleAccountClient(state({ appleId: ' Owner@iCloud.com ' })).state.appleId).toBe('owner@icloud.com')
+    expect(new AppleAccountClient(state()).state).not.toHaveProperty('appleId')
   })
   it('reports an unrecognised listing payload instead of claiming zero aliases', async () => {
     // aliasArray() cannot find a list in this shape. Returning [] would let the

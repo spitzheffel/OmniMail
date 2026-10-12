@@ -15,7 +15,11 @@ export const ICLOUD_ALIAS_FALLBACK_LIMITS: Record<ICloudAliasChannel, number> = 
 
 export const ICLOUD_ALIAS_CHANNEL_ORDER: readonly ICloudAliasChannel[] = ['apple_account', 'icloud_web']
 
-export type AliasItemStatus = 'pending' | 'running' | 'success' | 'error' | 'skipped'
+/**
+ * `unknown`: the create went out but no verdict came back, so Apple may hold
+ * the alias. Reporting it as a failure invites a retry that creates a second one.
+ */
+export type AliasItemStatus = 'pending' | 'running' | 'success' | 'error' | 'skipped' | 'unknown'
 
 export type AliasBatchItem = {
   id: string
@@ -58,6 +62,7 @@ export type AliasBatchSummary = {
   success: number
   failed: number
   skipped: number
+  unknown: number
   apple: number
   web: number
 }
@@ -95,21 +100,22 @@ export function availableChannels(channels: ICloudAliasQuotaChannel[]): ICloudAl
 
 export type AliasChannelAccount = Pick<
   ICloudAccount, 'hasCookies' | 'hasAppleAccount' | 'appleAccountStatus'
->
+> & Partial<Pick<ICloudAccount, 'status'>>
 
 /**
  * Which channels the saved credentials can actually use, mirroring the server's
- * iCloudAliasChannels(). An expired Apple session is not one of them: Apple has
- * already rejected it, so offering it plans a batch onto slots that cannot be
- * spent. Both the workspace entry point and the quota fallback read it here so
- * they cannot disagree about what "has a login" means.
+ * iCloudAliasChannels(). An expired Apple session is not one of them, and
+ * neither is a cookie jar Apple rejected (the account's `error` status): Apple
+ * has already refused each, so offering it plans a batch onto slots that cannot
+ * be spent. Both the workspace entry point and the quota fallback read it here
+ * so they cannot disagree about what "has a login" means.
  */
 export function accountChannelAvailability(
   account: AliasChannelAccount,
 ): Record<ICloudAliasChannel, boolean> {
   return {
     apple_account: Boolean(account.hasAppleAccount) && account.appleAccountStatus !== 'expired',
-    icloud_web: Boolean(account.hasCookies),
+    icloud_web: Boolean(account.hasCookies) && account.status !== 'error',
   }
 }
 
@@ -123,14 +129,36 @@ export function hasUsableAliasChannel(account: AliasChannelAccount): boolean {
  * they came to disagree about which of the two reasons applies.
  */
 export function aliasChannelBlockedMessage(account?: AliasChannelAccount): string {
-  return account?.appleAccountStatus === 'expired'
-    ? t('Apple Account 登录态已过期，请重新导入。')
-    : t('配置 Cookie 或 Apple Account 后可创建隐藏邮箱')
+  if (account?.appleAccountStatus === 'expired') return t('Apple Account 登录态已过期，请重新登录。')
+  if (account?.hasCookies && account.status === 'error') return t('iCloud Cookie 已失效，请在账号设置中更新。')
+  return t('配置 Cookie 或 Apple Account 后可创建隐藏邮箱')
+}
+
+function errorStatus(error: unknown): unknown {
+  return (error as { status?: unknown } | null)?.status
 }
 
 /** A 429 from the alias endpoints is always the hourly cap. */
 export function isAliasQuotaRejection(error: unknown): boolean {
-  return (error as { status?: unknown } | null)?.status === 429
+  return errorStatus(error) === 429
+}
+
+/**
+ * A 422 is the channel's credentials failing (an expired Apple Account session,
+ * a rejected cookie jar), not this one item: every later call on the same
+ * channel would fail the same way.
+ */
+export function isAliasCredentialRejection(error: unknown): boolean {
+  return errorStatus(error) === 422
+}
+
+/**
+ * No verdict: the browser gave up waiting (408) or the Worker timed out on
+ * Apple (504). The create may still have been committed upstream.
+ */
+export function isAliasOutcomeUnknown(error: unknown): boolean {
+  const status = errorStatus(error)
+  return status === 408 || status === 504
 }
 
 /** How many aliases the chosen mode can still create this hour. */
@@ -186,7 +214,83 @@ export function batchSummary(items: AliasBatchItem[]): AliasBatchSummary {
     success: done.length,
     failed: items.filter((item) => item.status === 'error').length,
     skipped: items.filter((item) => item.status === 'skipped').length,
+    unknown: items.filter((item) => item.status === 'unknown').length,
     apple: done.filter((item) => item.channel === 'apple_account').length,
     web: done.filter((item) => item.channel === 'icloud_web').length,
   }
+}
+
+/**
+ * What a progress row leads with. "Waiting for Apple" only holds while the item
+ * can still produce an address; once it has ended without one it contradicts
+ * the badge beside it, and for a cookie item whose preview failed it also names
+ * the wrong party.
+ */
+export function aliasItemHeadline(item: Pick<AliasBatchItem, 'email' | 'label' | 'status'>): string {
+  if (item.email) return item.email
+  if (item.label) return item.label
+  if (item.status === 'pending' || item.status === 'running') return t('等待 Apple 生成地址')
+  return item.status === 'unknown' ? t('地址未知') : t('未创建')
+}
+
+/**
+ * The cards '继续创建' brings back: every one that was not created, with what
+ * the run learned about it. A refused card loses its reservation, or the next
+ * submit would offer Apple the address it just turned down. A card whose result
+ * is unknown keeps it: re-sending the same address cannot make a second alias,
+ * a fresh one could.
+ */
+export function draftsAfterRun(drafts: AliasDraft[], items: AliasBatchItem[]): AliasDraft[] {
+  const outcomes = new Map(items.map((item) => [item.id, item]))
+  return drafts.flatMap((draft) => {
+    const item = outcomes.get(draft.id)
+    if (!item || item.status === 'pending' || item.status === 'skipped') return [draft]
+    if (item.status === 'success') return []
+    return item.status === 'unknown'
+      ? [{ ...draft, email: item.email, previewId: item.previewId, error: item.error }]
+      : [{ ...draft, email: '', previewId: '', error: item.error }]
+  })
+}
+
+/**
+ * Whether the workspace has to re-read the account after a run. Not only when
+ * something was created: a create whose verdict never came may exist upstream,
+ * and a failure may have changed the stored account (an expired session, a
+ * rejected jar) that the next plan is built from.
+ */
+export function shouldResyncAfterRun(result: { items: AliasBatchItem[]; created: unknown[] }): boolean {
+  return result.created.length > 0
+    || result.items.some((item) => item.status === 'error' || item.status === 'unknown')
+}
+
+function resetAt(channels: ICloudAliasQuotaChannel[], spent: (quota: ICloudAliasQuotaChannel) => boolean) {
+  const resets = channels
+    .filter((quota) => quota.available && spent(quota))
+    .map((quota) => Date.parse(quota.resetsAt))
+    .filter(Number.isFinite)
+  return resets.length ? Math.min(...resets) : undefined
+}
+
+/** When the hour rolls over for a usable channel that has nothing left, in epoch ms. */
+export function exhaustedResetAt(channels: ICloudAliasQuotaChannel[]): number | undefined {
+  return resetAt(channels, (quota) => quota.remaining <= 0)
+}
+
+/** Lands the re-read just after the server's hour floor has moved on. */
+const QUOTA_RESET_SLACK_MS = 1_000
+/** A reset already in the past means the clocks disagree; back off, don't spin. */
+const QUOTA_RETRY_MS = 15_000
+
+/**
+ * How long to wait before reading the quota again, or undefined when nothing in
+ * the current window has been spent and a reset would change nothing. Without
+ * it, a dialog that reached 0 stays locked after the window resets.
+ */
+export function quotaRefreshDelay(channels: ICloudAliasQuotaChannel[], now: number): number | undefined {
+  const reset = resetAt(channels, (quota) => quota.remaining < quota.limit)
+  if (reset === undefined) return undefined
+  if (reset <= now) return QUOTA_RETRY_MS
+  // The server floors windows to the hour; anything further out is bogus, and
+  // setTimeout fires at once for delays past 2^31 - 1 ms.
+  return Math.min(reset - now, 3_600_000) + QUOTA_RESET_SLACK_MS
 }

@@ -400,6 +400,7 @@ export function PanelApp() {
               iCloudAccountId={iCloud.accountId}
               iCloudAliases={iCloud.aliases}
               iCloudSelectedAlias={iCloud.selectedAlias}
+              iCloudUnavailableReason={iCloud.unavailableReason}
               iCloudBusy={loading}
               iCloudCreating={iCloud.creating}
               iCloudLoadingAccounts={iCloud.loadingAccounts}

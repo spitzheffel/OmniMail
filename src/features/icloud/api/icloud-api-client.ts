@@ -3,7 +3,36 @@ import type {
   ICloudAliasQuotaChannel, ICloudHost, ICloudMessage,
 } from '../../../shared/api/api-types'
 
-type Request = <T>(path: string, init?: RequestInit) => Promise<T>
+type Request = <T>(path: string, init?: RequestInit & { timeoutMs?: number }) => Promise<T>
+
+/**
+ * An Apple Account create can queue behind the account's session gate, refresh
+ * the session and then add and complete the alias: up to five Apple calls of
+ * 20 s each, plus D1 writes. Giving up sooner turns aliases Apple did create
+ * into failures the user retries.
+ */
+const ALIAS_CREATE_TIMEOUT_MS = 120_000
+
+/**
+ * A sign-in step makes up to ten sequential Apple calls and gives up on its own
+ * after 90 s. Waiting less would let the server push a code to a user whose
+ * browser had already stopped listening for the challenge it belongs to.
+ */
+const APPLE_SIGN_IN_TIMEOUT_MS = 120_000
+
+/** A sign-in waiting for its verification code. */
+export interface ICloudAppleTwoFactor {
+  needs2FA: true
+  challengeId: string
+  expiresAt: string
+  /** Where the code went: a push to trusted devices, or an SMS to `phoneId`. */
+  method: 'trusted_device' | 'phone'
+  /** The trusted phones Apple can text, numbers masked; empty when it did not say. */
+  phones: { id: number; number: string }[]
+  phoneId?: number
+}
+
+export type ICloudAppleSignIn = ICloudAppleTwoFactor | { needs2FA: false; account: ICloudAccount }
 
 export function createICloudApi(request: Request, jsonBody: (value: unknown) => string) {
   return {
@@ -41,19 +70,20 @@ export function createICloudApi(request: Request, jsonBody: (value: unknown) => 
       )
     ),
     startICloudAppleAccountLogin: (id: string, appleId: string, password: string) => (
-      request<{
-        needs2FA: boolean
-        challengeId?: string
-        expiresAt?: string
-        account?: ICloudAccount
-      }>(`/api/icloud/accounts/${encodeURIComponent(id)}/apple-account/login/start`, {
-        method: 'POST', body: jsonBody({ appleId, password }),
+      request<ICloudAppleSignIn>(`/api/icloud/accounts/${encodeURIComponent(id)}/apple-account/login/start`, {
+        method: 'POST', body: jsonBody({ appleId, password }), timeoutMs: APPLE_SIGN_IN_TIMEOUT_MS,
+      })
+    ),
+    /** Have the code for a waiting sign-in sent by SMS instead, or sent again. */
+    sendICloudAppleAccountLoginSms: (id: string, challengeId: string, phoneId?: number) => (
+      request<ICloudAppleTwoFactor>(`/api/icloud/accounts/${encodeURIComponent(id)}/apple-account/login/sms`, {
+        method: 'POST', body: jsonBody({ challengeId, phoneId }), timeoutMs: APPLE_SIGN_IN_TIMEOUT_MS,
       })
     ),
     completeICloudAppleAccountLogin: (id: string, challengeId: string, code: string) => (
-      request<{ needs2FA: false; account?: ICloudAccount }>(
+      request<{ needs2FA: false; account: ICloudAccount }>(
         `/api/icloud/accounts/${encodeURIComponent(id)}/apple-account/login/2fa`,
-        { method: 'POST', body: jsonBody({ challengeId, code }) },
+        { method: 'POST', body: jsonBody({ challengeId, code }), timeoutMs: APPLE_SIGN_IN_TIMEOUT_MS },
       )
     ),
     updateICloudAppleAccount: (id: string, state: AppleAccountState) => request<{ account: ICloudAccount }>(
@@ -95,7 +125,7 @@ export function createICloudApi(request: Request, jsonBody: (value: unknown) => 
       remaining: number
     }>(
       '/api/icloud/aliases',
-      { method: 'POST', body: jsonBody(input) },
+      { method: 'POST', body: jsonBody(input), timeoutMs: ALIAS_CREATE_TIMEOUT_MS },
     ),
     updateICloudAlias: (
       anonymousId: string,

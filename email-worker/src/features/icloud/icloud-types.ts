@@ -12,17 +12,21 @@ export interface AppleAccountState {
   userAgent: string
   host: string
   origin: string
+  /** The Apple ID the session signed in as; absent on sessions imported or saved before it was kept. */
+  appleId?: string
 }
 
 /**
- * The Apple session as a request read it. The ciphertext doubles as a version
- * because every encryption draws a fresh IV; the plaintext tells a pure
- * re-encryption (a key migration) apart from a newer session.
+ * A secret as a request read it. The ciphertext doubles as a version because
+ * every encryption draws a fresh IV; the plaintext tells a pure re-encryption
+ * (a key migration) apart from a newer value.
  */
-export interface AppleAccountRead {
+export interface SecretRead {
   cipher: string
   plaintext: string
 }
+
+export type AppleAccountRead = SecretRead
 
 export interface ICloudAccount {
   id: string
@@ -44,6 +48,8 @@ export interface ICloudAccount {
   appleAccountError?: string
   /** How the session above was stored when read. Server-only; never part of a response. */
   appleAccountRead?: AppleAccountRead
+  /** How the cookie jar was stored when read. Server-only; never part of a response. */
+  cookiesRead?: SecretRead
   createdAt: string
 }
 
@@ -70,7 +76,7 @@ export interface ICloudAccountRow {
 
 export type PublicICloudAccount = Omit<
   ICloudAccount,
-  'cookies' | 'appPassword' | 'appleAccountState' | 'appleAccountRead' | 'userId'
+  'cookies' | 'appPassword' | 'appleAccountState' | 'appleAccountRead' | 'cookiesRead' | 'userId'
 > & {
   hasCookies: boolean
   hasAppPassword: boolean

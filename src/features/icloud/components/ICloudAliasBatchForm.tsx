@@ -1,23 +1,27 @@
 import { AlertCircle, LoaderCircle, Plus, RotateCcw } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { api, type ICloudAccount } from '../../../shared/api'
-import { t } from '../../../shared/i18n'
+import { getLocale, t } from '../../../shared/i18n'
 import '../styles/icloud-alias-batch.css'
-import { useICloudAliasDrafts } from '../hooks/useICloudAliasDrafts'
+import { queueCookieJarCall, useICloudAliasDrafts } from '../hooks/useICloudAliasDrafts'
 import { useICloudAliasQuota } from '../hooks/useICloudAliasQuota'
 import {
+  ICLOUD_ALIAS_CHANNEL_ORDER,
   aliasChannelBlockedMessage,
   availableChannels,
   batchSummary,
   buildAliasBatch,
+  draftsAfterRun,
   draftsToBatch,
+  exhaustedResetAt,
   hasUsableAliasChannel,
   planAliasBatch,
   remainingFor,
+  shouldResyncAfterRun,
   type AliasBatchItem,
   type ICloudAliasChannelChoice,
 } from '../model/icloud-alias-batch'
-import { runAliasBatch, type CreatedAlias } from '../model/icloud-alias-batch-run'
+import { runAliasBatch, type AliasBatchApi, type CreatedAlias } from '../model/icloud-alias-batch-run'
 import { ICloudAliasBatchProgress } from './ICloudAliasBatchProgress'
 import { ICloudAliasDraftActions, ICloudAliasDraftCards } from './ICloudAliasDraftCards'
 import { ICloudAliasQuantityFields } from './ICloudAliasQuantityFields'
@@ -30,16 +34,38 @@ const CHOICE_LABELS: Record<ICloudAliasChannelChoice, string> = {
   icloud_web: 'iCloud Cookie',
 }
 
+// The run's cookie-channel calls write the same jar as the card previews, so
+// they wait their turn on the same queue.
+const batchApi: AliasBatchApi = {
+  previewICloudAlias: (accountId) => queueCookieJarCall(accountId, () => api.previewICloudAlias(accountId)),
+  createICloudAlias: (input) => (input.channel === 'icloud_web'
+    ? queueCookieJarCall(input.accountId, () => api.createICloudAlias(input))
+    : api.createICloudAlias(input)),
+}
+
 function Spinner() {
   return <LoaderCircle className="spin" size={15} aria-hidden="true" />
 }
 
-export function ICloudAliasBatchForm({ account, close, onCreated }: {
+function clockTime(at: number): string {
+  return new Date(at).toLocaleTimeString(getLocale(), { hour: '2-digit', minute: '2-digit' })
+}
+
+export function ICloudAliasBatchForm({ account, close, closing = false, onCreated }: {
   account: ICloudAccount
   close: () => void
+  /** ICloudModal has started closing; it unmounts the form 210 ms later. */
+  closing?: boolean
+  /**
+   * Re-syncs the workspace after a run, with nothing created too: a create whose
+   * answer never came may exist upstream, and a failed one may have changed the
+   * stored account (an expired session).
+   */
   onCreated: (aliases: CreatedAlias[]) => Promise<void>
 }) {
-  const { channels, estimated, error: quotaError, applyRemaining } = useICloudAliasQuota(account)
+  const {
+    channels, unusable, estimated, error: quotaError, applyRemaining, disable, refresh: refreshQuota,
+  } = useICloudAliasQuota(account)
   const [choice, setChoice] = useState<ICloudAliasChannelChoice>('auto')
   const [quantity, setQuantity] = useState(1)
   const [baseLabel, setBaseLabel] = useState('')
@@ -48,6 +74,17 @@ export function ICloudAliasBatchForm({ account, close, onCreated }: {
   const [progress, setProgress] = useState({ completed: 0, total: 0 })
   const [runError, setRunError] = useState('')
   const stopped = useRef(false)
+  // Set once the dialog starts closing. A run settling after that must leave
+  // the workspace alone: it may already show another account.
+  const dismissed = useRef(false)
+  const accountId = useRef(account.id)
+  accountId.current = account.id
+  const resync = useRef(onCreated)
+  resync.current = onCreated
+  const formRef = useRef<HTMLFormElement>(null)
+  const progressRef = useRef<HTMLProgressElement>(null)
+  const doneRef = useRef<HTMLButtonElement>(null)
+  const focusedStep = useRef(step)
 
   const usable = useMemo(() => availableChannels(channels), [channels])
   const bothChannels = usable.length > 1
@@ -56,25 +93,62 @@ export function ICloudAliasBatchForm({ account, close, onCreated }: {
   const useCards = effective === 'icloud_web'
   const maximum = Math.max(0, remainingFor(channels, effective))
   const running = step === 'running'
+  const resetsAt = exhaustedResetAt(channels)
 
   const drafts = useICloudAliasDrafts(
     account.id,
     maximum,
-    useCards,
+    useCards && !closing,
     () => applyRemaining('icloud_web', 0),
   )
+  const { clamp } = drafts
   const count = useCards ? drafts.drafts.length : Math.min(quantity, Math.max(1, maximum))
 
   useEffect(() => {
     setQuantity((value) => Math.max(1, Math.min(value, Math.max(1, maximum))))
   }, [maximum])
 
-  // Closing mid-run leaves the loop to finish its current item and stop.
-  useEffect(() => () => { stopped.current = true }, [])
+  // Cards are capped as they are added, against whatever budget was known then;
+  // the real one can arrive later and be smaller.
+  useEffect(() => {
+    if (useCards && step === 'form') clamp(maximum)
+  }, [clamp, maximum, step, useCards])
+
+  useEffect(() => {
+    // StrictMode replays the mount after a simulated unmount; only a real
+    // unmount may leave these set.
+    dismissed.current = false
+    return () => {
+      stopped.current = true
+      dismissed.current = true
+    }
+  }, [])
+
+  // ICloudModal keeps the form mounted through its exit animation. Waiting for
+  // the unmount lets an item that settles in that window start another create,
+  // and spend another hourly slot, after the user asked to stop.
+  useEffect(() => {
+    if (!closing) return
+    stopped.current = true
+    dismissed.current = true
+  }, [closing])
+
+  // Each step disables or removes the control that had focus (the submit
+  // button, then the progress bar), which would drop focus out of the dialog.
+  useEffect(() => {
+    if (focusedStep.current === step) return
+    focusedStep.current = step
+    if (step === 'running') progressRef.current?.focus()
+    else if (step === 'complete') doneRef.current?.focus()
+    else {
+      (formRef.current?.querySelector<HTMLElement>('[data-modal-autofocus]:not(:disabled)')
+        || doneRef.current)?.focus()
+    }
+  }, [step])
 
   async function submit(event: FormEvent) {
     event.preventDefault()
-    if (running || maximum < 1) return
+    if (closing || running || maximum < 1) return
     const planned = useCards
       ? draftsToBatch(drafts.drafts)
       : buildAliasBatch(
@@ -83,14 +157,15 @@ export function ICloudAliasBatchForm({ account, close, onCreated }: {
         () => crypto.randomUUID(),
       )
     if (!planned.length) return
+    const runAccountId = account.id
     stopped.current = false
     setRunError('')
     setItems(planned)
     setProgress({ completed: 0, total: planned.length })
     setStep('running')
     const result = await runAliasBatch({
-      api,
-      accountId: account.id,
+      api: batchApi,
+      accountId: runAccountId,
       items: planned,
       choice: effective,
       quota: channels,
@@ -103,43 +178,61 @@ export function ICloudAliasBatchForm({ account, close, onCreated }: {
         })
       },
     })
+    if (dismissed.current) return
     setItems(result.items)
-    applyRemaining('apple_account', result.remaining.apple_account)
-    applyRemaining('icloud_web', result.remaining.icloud_web)
     setStep('complete')
-    if (result.created.length) await onCreated(result.created)
-    else if (batchSummary(result.items).failed === 0) setRunError(t('本次没有创建任何隐藏邮箱。'))
+    // The dialog now serves another account: this run's numbers are not its
+    // numbers, and a sync would load this account's aliases over it.
+    if (accountId.current !== runAccountId) return
+    for (const channel of ICLOUD_ALIAS_CHANNEL_ORDER) {
+      const left = result.remaining[channel]
+      if (left !== undefined) applyRemaining(channel, left)
+    }
+    for (const channel of result.unusable) disable(channel)
+    // The run only learns about the channels it used. Availability (a session
+    // the server has just marked expired) and the reset time come from here.
+    void refreshQuota()
+    if (shouldResyncAfterRun(result)) await resync.current(result.created)
+    else setRunError(t('本次没有创建任何隐藏邮箱。'))
   }
 
   function restart() {
     // Created cards already exist upstream and their previewId is spent; only
-    // the unfinished ones come back for another go.
-    if (useCards) {
-      drafts.prune(new Set(items.filter((item) => item.status !== 'success').map((item) => item.id)))
-    }
+    // the unfinished ones come back, carrying what the run learned about them.
+    if (useCards) drafts.restore(draftsAfterRun(drafts.drafts, items))
     setItems([])
     setProgress({ completed: 0, total: 0 })
     setRunError('')
     setStep('form')
   }
 
-  const summaryText = running || step === 'complete'
-    ? t('创建进度 {completed}/{total}', progress)
-    : !hasUsableAliasChannel(account)
-      // Not a budget problem: waiting for the window to roll over changes
-      // nothing, the credentials themselves have to be fixed.
-      ? aliasChannelBlockedMessage(account)
-      : maximum < 1
-        ? t('本小时额度已用完')
-        : t('创建项目 {count}/{max}', { count, max: maximum })
+  function idleSummary(): string {
+    // Not a budget problem: waiting for the window to roll over changes
+    // nothing, the credentials themselves have to be fixed.
+    if (!hasUsableAliasChannel(account)) return aliasChannelBlockedMessage(account)
+    if (maximum >= 1) return t('创建项目 {count}/{max}', { count, max: maximum })
+    if (unusable.length && !usable.length) return t('登录态已失效，请在账号设置中更新后再创建。')
+    return resetsAt === undefined
+      ? t('本小时额度已用完')
+      : t('本小时额度已用完，{time} 恢复', { time: clockTime(resetsAt) })
+  }
+
+  const summary = batchSummary(items)
+  const announcement = step !== 'complete' ? '' : [
+    t('创建已结束：{success} 个成功，{failed} 个失败。', summary),
+    summary.unknown ? t('{unknown} 个结果未知。', summary) : '',
+    summary.skipped ? t('{skipped} 个未创建。', summary) : '',
+  ].filter(Boolean).join(' ')
 
   return (
-    <form className="icloud-form icloud-alias-batch-form" onSubmit={(event) => void submit(event)}>
+    <form ref={formRef} className="icloud-form icloud-alias-batch-form"
+      onSubmit={(event) => void submit(event)}>
       <div className="icloud-alias-batch-toolbar">
         <div className="icloud-alias-batch-summary">
-          <span>{summaryText}</span>
-          <progress className={running ? 'is-active' : ''} max={progress.total || 1}
-            value={progress.completed} aria-label={t('创建进度')} aria-hidden={!running} />
+          <span>{running || step === 'complete' ? t('创建进度 {completed}/{total}', progress) : idleSummary()}</span>
+          <progress ref={progressRef} tabIndex={-1} className={running ? 'is-active' : ''}
+            max={progress.total || 1} value={progress.completed}
+            aria-label={t('创建进度')} aria-hidden={!running} />
         </div>
         {step === 'form' && bothChannels && <div className="icloud-alias-channel-switch"
           role="group" aria-label={t('创建通道')}>
@@ -159,7 +252,8 @@ export function ICloudAliasBatchForm({ account, close, onCreated }: {
           onPreview={drafts.preview} onRemove={drafts.remove} onLabel={drafts.setLabel} />
         : <ICloudAliasQuantityFields quantity={count} maximum={maximum} baseLabel={baseLabel}
           disabled={running} onQuantity={setQuantity} onBaseLabel={setBaseLabel} />
-        : <ICloudAliasBatchProgress items={items} complete={step === 'complete'} />}
+        : <ICloudAliasBatchProgress items={items} complete={step === 'complete'}
+          resetTime={resetsAt === undefined ? '' : clockTime(resetsAt)} />}
 
       {step === 'form' && <p className="icloud-alias-quota">
         {channels.filter((quota) => quota.available).map((quota) => (
@@ -174,15 +268,19 @@ export function ICloudAliasBatchForm({ account, close, onCreated }: {
       </p>}
 
       {runError && <p className="inline-error" role="alert"><AlertCircle size={15} />{t(runError)}</p>}
+      {/* Present from the first render: a live region that arrives with its
+          text already inside is often not announced at all. Worded apart from
+          the visible summary, which stays plain text. */}
+      <p className="sr-only" role="status">{announcement}</p>
 
       <footer>
         {step === 'complete' && <button className="button button--secondary" type="button"
           onClick={restart}><RotateCcw size={15} />{t('继续创建')}</button>}
-        <button className="button button--secondary" type="button" onClick={close}>
+        <button ref={doneRef} className="button button--secondary" type="button" onClick={close}>
           {t(step === 'complete' ? '完成' : running ? '停止并关闭' : '取消')}
         </button>
         {step !== 'complete' && <button className="button button--primary"
-          disabled={running || maximum < 1 || (useCards && drafts.busy)}>
+          disabled={closing || running || maximum < 1 || (useCards && drafts.busy)}>
           {running ? <Spinner /> : <Plus size={15} />}
           {running
             ? t('正在创建 {completed}/{total}', progress)

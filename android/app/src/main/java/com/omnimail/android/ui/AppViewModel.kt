@@ -14,7 +14,9 @@ import com.omnimail.android.data.model.MailboxScope
 import com.omnimail.android.data.model.PageInfo
 import com.omnimail.android.data.model.BulkMessageAction
 import com.omnimail.android.data.model.UpdateMessageRequest
+import com.omnimail.android.data.model.ICloudAlias
 import com.omnimail.android.data.model.ICloudAliasPreview
+import com.omnimail.android.data.model.ICloudInboxResponse
 import com.omnimail.android.data.model.Attachment
 import com.omnimail.android.data.model.UploadFile
 import com.omnimail.android.data.repository.ActiveSession
@@ -268,19 +270,20 @@ class AppViewModel(
                     batchTotal = candidates.size,
                 ))
             }
-            var completed = 0
+            val created = mutableListOf<ICloudAlias>()
             var failure: Throwable? = null
             for (candidate in candidates) {
                 try {
-                    repository.createICloudAlias(
+                    created += repository.createICloudAlias(
                         accountId,
                         candidate.label.trim(),
-                        candidate.email,
-                        candidate.previewId,
+                        // Blank when the account creates through its Apple Account
+                        // session, which never previews an address.
+                        candidate.email.takeIf(String::isNotBlank),
+                        candidate.previewId.takeIf(String::isNotBlank),
                     )
-                    completed += 1
                     _uiState.update {
-                        it.copy(iCloud = it.iCloud.copy(batchCompleted = completed))
+                        it.copy(iCloud = it.iCloud.copy(batchCompleted = created.size))
                     }
                 } catch (error: Throwable) {
                     if (error is CancellationException) throw error
@@ -295,9 +298,9 @@ class AppViewModel(
                     batchTotal = 0,
                 ))
             }
-            loadICloudScope(accountId, candidates.getOrNull(completed - 1)?.email.orEmpty())
+            loadICloudScope(accountId, created.lastOrNull()?.email.orEmpty(), created)
             if (failure is SessionExpiredException) handleOperationFailure(failure)
-            onComplete(completed, failure?.message)
+            onComplete(created.size, failure?.message)
         }
     }
     fun openComposer() {
@@ -1076,7 +1079,11 @@ class AppViewModel(
         }
     }
 
-    private fun loadICloudScope(accountId: String, preferredAlias: String = "") {
+    private fun loadICloudScope(
+        accountId: String,
+        preferredAlias: String = "",
+        created: List<ICloudAlias> = emptyList(),
+    ) {
         if (accountId.isBlank()) return
         iCloudScopeJob?.cancel()
         iCloudDetailJob?.cancel()
@@ -1090,14 +1097,21 @@ class AppViewModel(
                 ), error = null)
             }
             runCatching {
-                val aliases = repository.iCloudAliases(accountId)
+                val aliases = withCreatedAliases(repository.iCloudAliases(accountId), created)
                 val currentAlias = _uiState.value.iCloud.selectedAlias
                 val selectedAlias = when {
                     aliases.any { it.email == preferredAlias } -> preferredAlias
                     aliases.any { it.email == currentAlias } -> currentAlias
                     else -> ""
                 }
-                Triple(aliases, selectedAlias, repository.iCloudInbox(accountId, selectedAlias))
+                // The inbox refuses an account it cannot read, and that failure
+                // would throw away the aliases listed above along with it.
+                val inbox = if (readsICloudMail(accountId)) {
+                    repository.iCloudInbox(accountId, selectedAlias)
+                } else {
+                    ICloudInboxResponse(method = "")
+                }
+                Triple(aliases, selectedAlias, inbox)
             }.onSuccess { (aliases, selectedAlias, inbox) ->
                 if (_uiState.value.iCloud.selectedAccountId == accountId) {
                     _uiState.update {
@@ -1115,8 +1129,12 @@ class AppViewModel(
         }
     }
 
+    /** Accounts missing from the list keep the old behaviour of asking the server. */
+    private fun readsICloudMail(accountId: String): Boolean =
+        _uiState.value.iCloud.accounts.firstOrNull { it.id == accountId }?.readsMail() != false
+
     private fun loadICloudInbox(accountId: String, alias: String) {
-        if (accountId.isBlank()) return
+        if (accountId.isBlank() || !readsICloudMail(accountId)) return
         iCloudScopeJob?.cancel()
         iCloudScopeJob = viewModelScope.launch {
             _uiState.update {

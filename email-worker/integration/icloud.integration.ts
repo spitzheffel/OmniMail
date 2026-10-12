@@ -130,9 +130,10 @@ describe('iCloud account API', () => {
 describe('iCloud alias hourly quota', () => {
   // 2026-09-17T10:17:36Z — deliberately off an hour boundary.
   const NOW = 1_789_640_256
-  // One hour per test, because a window resets on any hour it has not seen.
-  // Sharing one made every case depend on the rows its predecessors left
-  // behind, so the suite only passed in declaration order.
+  // One hour per test, because a window resets on any later hour it has not
+  // seen. A window also never moves back, so the hours rise in declaration
+  // order: a test stamped earlier than the row its predecessor left would be
+  // refused as a late arrival.
   const AT = {
     budget: NOW,
     refusing: NOW + 1 * 3600,
@@ -142,6 +143,11 @@ describe('iCloud alias hourly quota', () => {
     rollover: NOW + 4 * 3600,
     saturated: NOW + 6 * 3600,
     scoped: NOW + 7 * 3600,
+    // The cases below use the hour given and the one after it.
+    late: NOW + 8 * 3600,
+    lateRefund: NOW + 10 * 3600,
+    cappedRefund: NOW + 12 * 3600,
+    lateCap: NOW + 13 * 3600,
   }
   const APPLE_LIMIT = ICLOUD_ALIAS_HOURLY_LIMITS.apple_account
 
@@ -165,7 +171,7 @@ describe('iCloud alias hourly quota', () => {
     for (let taken = 1; taken <= APPLE_LIMIT; taken += 1) {
       await expect(
         claimICloudAliasCreate(env.DB, 'icloud-owner', 'icloud-account-1', 'apple_account', AT.budget),
-      ).resolves.toEqual({ allowed: true, remaining: APPLE_LIMIT - taken })
+      ).resolves.toEqual({ allowed: true, remaining: APPLE_LIMIT - taken, hourStartedAt: hourStart(AT.budget) })
     }
 
     const denied = await claimICloudAliasCreate(
@@ -197,7 +203,9 @@ describe('iCloud alias hourly quota', () => {
 
     await expect(
       claimICloudAliasCreate(env.DB, 'icloud-owner', 'icloud-account-1', 'icloud_web', AT.channels),
-    ).resolves.toEqual({ allowed: true, remaining: ICLOUD_ALIAS_HOURLY_LIMITS.icloud_web - 1 })
+    ).resolves.toEqual({
+      allowed: true, remaining: ICLOUD_ALIAS_HOURLY_LIMITS.icloud_web - 1, hourStartedAt: hourStart(AT.channels),
+    })
   })
 
   it('refunds a reservation that never reached Apple', async () => {
@@ -205,7 +213,9 @@ describe('iCloud alias hourly quota', () => {
       claimICloudAliasCreate(env.DB, 'icloud-owner', 'icloud-account-1', 'icloud_web', AT.refund),
     ).resolves.toMatchObject({ allowed: true })
 
-    await releaseICloudAliasCreate(env.DB, 'icloud-owner', 'icloud-account-1', 'icloud_web', AT.refund)
+    await releaseICloudAliasCreate(
+      env.DB, 'icloud-owner', 'icloud-account-1', 'icloud_web', hourStart(AT.refund), AT.refund,
+    )
 
     expect(await windowRow('icloud_web'))
       .toMatchObject({ hour_started_at: hourStart(AT.refund), hour_count: 0 })
@@ -217,7 +227,7 @@ describe('iCloud alias hourly quota', () => {
     const next = AT.rollover + 3600
     await expect(
       claimICloudAliasCreate(env.DB, 'icloud-owner', 'icloud-account-1', 'apple_account', next),
-    ).resolves.toEqual({ allowed: true, remaining: APPLE_LIMIT - 1 })
+    ).resolves.toEqual({ allowed: true, remaining: APPLE_LIMIT - 1, hourStartedAt: hourStart(next) })
     expect(await windowRow('apple_account'))
       .toMatchObject({ hour_started_at: hourStart(next), hour_count: 1 })
   })
@@ -227,7 +237,7 @@ describe('iCloud alias hourly quota', () => {
       env.DB, 'icloud-owner', 'icloud-account-1', 'apple_account', AT.saturated,
     )
 
-    expect(await windowRow('apple_account')).toMatchObject({ hour_count: APPLE_LIMIT })
+    expect((await windowRow('apple_account'))?.hour_count).toBeGreaterThanOrEqual(APPLE_LIMIT)
     await expect(
       claimICloudAliasCreate(env.DB, 'icloud-owner', 'icloud-account-1', 'apple_account', AT.saturated),
     ).resolves.toMatchObject({ allowed: false })
@@ -249,5 +259,56 @@ describe('iCloud alias hourly quota', () => {
         { channel: 'apple_account', used: 0, remaining: APPLE_LIMIT },
         { channel: 'icloud_web', used: 0, remaining: ICLOUD_ALIAS_HOURLY_LIMITS.icloud_web },
       ])
+  })
+
+  it('refuses a claim from an hour already over instead of rolling the window back', async () => {
+    // A claim stamped just before the hour that reaches D1 after the next one
+    // opened used to reset the row to its own hour, forgetting every claim
+    // the newer hour had already made.
+    const hour = hourStart(AT.late)
+    await claimICloudAliasCreate(env.DB, 'icloud-owner', 'icloud-account-1', 'apple_account', hour + 3600)
+
+    await expect(claimICloudAliasCreate(
+      env.DB, 'icloud-owner', 'icloud-account-1', 'apple_account', hour + 3599,
+    )).resolves.toEqual({ allowed: false, retryAfter: 1 })
+    expect(await windowRow('apple_account')).toMatchObject({ hour_started_at: hour + 3600, hour_count: 1 })
+  })
+
+  it('refunds into the hour the claim was taken from, not the one it fails in', async () => {
+    // The attempt failed after the hour turned: taking one off the new window
+    // would hand out a slot nobody spent there.
+    const hour = hourStart(AT.lateRefund)
+    await claimICloudAliasCreate(env.DB, 'icloud-owner', 'icloud-account-1', 'icloud_web', hour)
+    await claimICloudAliasCreate(env.DB, 'icloud-owner', 'icloud-account-1', 'icloud_web', hour + 3600)
+
+    await releaseICloudAliasCreate(env.DB, 'icloud-owner', 'icloud-account-1', 'icloud_web', hour, hour + 3601)
+
+    expect(await windowRow('icloud_web')).toMatchObject({ hour_started_at: hour + 3600, hour_count: 1 })
+  })
+
+  it('does not let a refund reopen a window Apple capped', async () => {
+    // A request in flight when Apple reported its cap is refunded afterwards;
+    // the window has to stay shut for the rest of the hour regardless.
+    const hour = hourStart(AT.cappedRefund)
+    const claim = await claimICloudAliasCreate(env.DB, 'icloud-owner', 'icloud-account-1', 'apple_account', hour)
+    await exhaustICloudAliasChannel(env.DB, 'icloud-owner', 'icloud-account-1', 'apple_account', hour + 1)
+
+    await releaseICloudAliasCreate(
+      env.DB, 'icloud-owner', 'icloud-account-1', 'apple_account', claim.allowed ? claim.hourStartedAt : 0, hour + 2,
+    )
+
+    await expect(claimICloudAliasCreate(env.DB, 'icloud-owner', 'icloud-account-1', 'apple_account', hour + 3))
+      .resolves.toMatchObject({ allowed: false })
+    await expect(readICloudAliasQuota(env.DB, 'icloud-owner', 'icloud-account-1', hour + 3))
+      .resolves.toMatchObject([{ channel: 'apple_account', used: APPLE_LIMIT, remaining: 0 }, { channel: 'icloud_web' }])
+  })
+
+  it('does not let a late cap report roll a newer window back', async () => {
+    const hour = hourStart(AT.lateCap)
+    await claimICloudAliasCreate(env.DB, 'icloud-owner', 'icloud-account-1', 'apple_account', hour + 3600)
+
+    await exhaustICloudAliasChannel(env.DB, 'icloud-owner', 'icloud-account-1', 'apple_account', hour + 3599)
+
+    expect(await windowRow('apple_account')).toMatchObject({ hour_started_at: hour + 3600, hour_count: 1 })
   })
 })

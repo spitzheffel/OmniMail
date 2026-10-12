@@ -31,6 +31,17 @@ describe('iCloud audit log presentation', () => {
     expect(targetName(entry)).toBe('Personal iCloud')
     expect(detailText(entry)).toBe('shop@icloud.com · 用途：Shopping')
   })
+
+  it('names the Apple Account actions and how a session or alias came about', () => {
+    expect(auditActionLabel('icloud.credentials.apple_account')).toBe('已更新 Apple Account 登录态')
+    expect(auditActionLabel('icloud.credentials.apple_account.delete')).toBe('已移除 Apple Account 登录态')
+    expect(detailText(log({ alias: 'shop@icloud.com', channel: 'apple_account' })))
+      .toBe('shop@icloud.com · 经 Apple Account 创建')
+    expect(detailText(log({ alias: 'shop@icloud.com', channel: 'icloud_web' })))
+      .toBe('shop@icloud.com · 经 iCloud 网页 Cookie 创建')
+    expect(detailText(log({ signIn: 'two_factor', appleAccountHost: 'appleid.apple.com' }, 'icloud.credentials.apple_account')))
+      .toBe('双重认证登录 · Apple Account 服务：appleid.apple.com')
+  })
 })
 
 describe('QQ Mail audit log presentation', () => {

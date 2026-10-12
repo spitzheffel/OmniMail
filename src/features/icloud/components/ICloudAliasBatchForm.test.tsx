@@ -1,7 +1,10 @@
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import type { ICloudAccount } from '../../../shared/api'
+import { ensureEnglishTranslations, translate } from '../../../shared/i18n'
+import type { AliasBatchItem } from '../model/icloud-alias-batch'
 import { ICloudAliasBatchForm } from './ICloudAliasBatchForm'
+import { ICloudAliasBatchProgress } from './ICloudAliasBatchProgress'
 
 function account(overrides: Partial<ICloudAccount>): ICloudAccount {
   return {
@@ -87,11 +90,18 @@ describe('ICloudAliasBatchForm', () => {
     // spent budget sends the user off to wait for a reset that changes nothing.
     const html = render({ hasAppleAccount: true, appleAccountStatus: 'expired' })
 
-    expect(html).toContain('Apple Account 登录态已过期，请重新导入。')
+    expect(html).toContain('Apple Account 登录态已过期，请重新登录。')
     expect(html).not.toContain('本小时额度已用完')
   })
 
-  it('asks for credentials rather than a re-import when there are none', () => {
+  it('asks for the cookies to be replaced when the jar is the only channel and Apple rejected it', () => {
+    const html = render({ hasCookies: true, status: 'error' })
+
+    expect(html).toContain('iCloud Cookie 已失效，请在账号设置中更新。')
+    expect(html).not.toContain('本小时额度已用完')
+  })
+
+  it('asks for credentials rather than a new sign-in when there are none', () => {
     const html = render({})
 
     expect(html).toContain('配置 Cookie 或 Apple Account 后可创建隐藏邮箱')
@@ -101,7 +111,7 @@ describe('ICloudAliasBatchForm', () => {
   it('keeps the budget wording while one channel is still usable', () => {
     const html = render({ hasCookies: true, hasAppleAccount: true, appleAccountStatus: 'expired' })
 
-    expect(html).not.toContain('Apple Account 登录态已过期，请重新导入。')
+    expect(html).not.toContain('Apple Account 登录态已过期，请重新登录。')
   })
 
   it('derives the ceiling from the usable channels rather than a fixed cap', () => {
@@ -110,5 +120,65 @@ describe('ICloudAliasBatchForm', () => {
     expect(render({ hasCookies: true })).not.toContain('创建项目 1/25')
     // The old dialog advertised a per-batch maximum; the budget is hourly now.
     expect(render({ hasAppleAccount: true, hasCookies: true })).not.toContain('一次最多')
+  })
+
+  it('words the idle summary in English as a plan, not as a run in progress', async () => {
+    await ensureEnglishTranslations()
+    const idle = translate('创建项目 {count}/{max}', { count: 1, max: 5 }, 'en-US')
+
+    expect(idle).not.toMatch(/creating/i)
+    expect(idle).not.toBe(translate('正在创建 {completed}/{total}', { completed: 1, total: 5 }, 'en-US'))
+  })
+
+  it('says what a blank base label becomes instead of crediting Apple', () => {
+    // Both server create paths fill in "OmniMail <UTC time>" themselves.
+    const html = render({ hasAppleAccount: true })
+
+    expect(html).toContain('留空时标签为 OmniMail 加创建时间（UTC）。')
+    expect(html).not.toContain('由 Apple 自动命名')
+  })
+
+  it('keeps one announcer mounted before there is anything to announce', () => {
+    const html = render({ hasAppleAccount: true })
+
+    expect(html.match(/role="status"/g)).toHaveLength(1)
+    expect(html).toMatch(/<p class="sr-only" role="status"><\/p>/)
+  })
+})
+
+describe('ICloudAliasBatchProgress', () => {
+  function item(status: AliasBatchItem['status'], error = ''): AliasBatchItem {
+    return { id: `item-${status}`, label: '', channel: 'apple_account', email: '', previewId: '', status, error }
+  }
+
+  it('settles rows without a live region or an alert apiece', () => {
+    // A channel running dry skips every remaining row in one commit; a region
+    // per row made that a burst of up to nineteen assertive announcements.
+    const html = renderToStaticMarkup(<ICloudAliasBatchProgress complete items={[
+      item('error', 'iCloud 暂时无法创建这个地址。'), item('skipped', '本小时创建额度已用完'),
+    ]} />)
+
+    expect(html).not.toContain('role="alert"')
+    expect(html).not.toContain('aria-live')
+    expect(html).not.toContain('role="status"')
+  })
+
+  it('tells when the budget comes back once items were left over', () => {
+    const skipped = [item('skipped', '本小时创建额度已用完')]
+
+    expect(renderToStaticMarkup(<ICloudAliasBatchProgress complete items={skipped} resetTime="10:00" />))
+      .toContain('额度将于 10:00 恢复。')
+    // Nothing left over, nothing to wait for.
+    const created = [{ ...item('success'), email: 'made@icloud.com' }]
+    expect(renderToStaticMarkup(<ICloudAliasBatchProgress complete items={created} resetTime="10:00" />))
+      .not.toContain('恢复')
+  })
+
+  it('stops waiting for Apple once a row has ended without an address', () => {
+    const html = renderToStaticMarkup(<ICloudAliasBatchProgress complete={false} items={[
+      item('error', 'iCloud 暂时无法创建这个地址。'), item('skipped', '已取消'), item('unknown', '请求超时'),
+    ]} />)
+
+    expect(html).not.toContain('等待 Apple 生成地址')
   })
 })

@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { getLocale, t, useLocale } from '../../src/shared/i18n'
 import type { ICloudAccount, ICloudAlias, ICloudMessage } from '../../src/shared/api/api-types'
 import { safeEmailDocument } from './email-document'
+import { canReadICloudMail, iCloudAccountLabel } from './icloud-accounts'
 import { PanelSelect } from './PanelSelect'
 import { PanelVerificationCode } from './PanelVerificationCode'
 import { sendExtensionMessage } from './protocol'
@@ -51,6 +52,11 @@ export function PanelICloudInbox(props: Props) {
   const [error, setError] = useState('')
 
   const effectiveAlias = alias ?? props.preferredAlias
+  const selectedAccount = props.accounts.find((account) => account.id === props.accountId)
+  // The shared account list is built for alias creation, which an Apple Account
+  // session covers on its own; reading mail still needs an app password or
+  // cookies, so such an account must not hit the inbox only to be refused.
+  const readsMail = !selectedAccount || canReadICloudMail(selectedAccount)
 
   useEffect(() => { setAlias(null) }, [props.accountId])
 
@@ -60,7 +66,7 @@ export function PanelICloudInbox(props: Props) {
   }, [props.aliases])
 
   const loadMessages = useCallback(async (quiet = false) => {
-    if (!props.accountId || !props.authorized || !props.enabled
+    if (!props.accountId || !props.authorized || !props.enabled || !readsMail
       || props.loadingAccounts || props.loadingAliases) return
     const currentRequest = ++requestId.current
     quiet ? setRefreshing(true) : setLoading(true)
@@ -93,6 +99,7 @@ export function PanelICloudInbox(props: Props) {
     props.enabled,
     props.loadingAccounts,
     props.loadingAliases,
+    readsMail,
   ])
 
   useEffect(() => {
@@ -171,7 +178,7 @@ export function PanelICloudInbox(props: Props) {
       <header className="inbox-toolbar">
         <div><p className="eyebrow">ICLOUD INBOX</p><h1>{t('iCloud 收件')}</h1></div>
         <button className="icon-button" type="button" title={t('刷新 iCloud 邮件')}
-          aria-label={t('刷新 iCloud 邮件')} disabled={refreshing || !props.accountId}
+          aria-label={t('刷新 iCloud 邮件')} disabled={refreshing || !props.accountId || !readsMail}
           onClick={() => void loadMessages(true)}>
           <RefreshCw className={refreshing ? 'spin' : ''} size={17} />
         </button>
@@ -179,42 +186,50 @@ export function PanelICloudInbox(props: Props) {
       <div className="icloud-inbox-filters">
         <PanelSelect id="icloud-inbox-account" ariaLabel={t('iCloud 收件账号')}
           value={props.accountId} options={props.accounts.map((account) => ({
-            label: `${account.name} · ${account.realEmail || account.icloudEmail || account.host}`,
+            label: iCloudAccountLabel(account),
             value: account.id,
           }))} disabled={props.loadingAccounts} onChange={props.onAccount} />
-        <PanelSelect id="icloud-inbox-alias" ariaLabel={t('iCloud 收件地址')} value={effectiveAlias}
+        {readsMail && <PanelSelect id="icloud-inbox-alias" ariaLabel={t('iCloud 收件地址')} value={effectiveAlias}
           options={[{ label: t('全部隐藏邮箱'), value: '' }, ...props.aliases.map((item) => ({
             label: item.label ? `${item.email} · ${item.label}` : item.email,
             value: item.email,
-          }))]} disabled={props.loadingAliases} onChange={setAlias} />
+          }))]} disabled={props.loadingAliases} onChange={setAlias} />}
       </div>
-      {error && <div className="icloud-inline-error" role="alert">{error}<button type="button" onClick={() => void loadMessages()}>{t('重试')}</button></div>}
-      {detailLoading && <div className="icloud-detail-loading" role="status">
-        <LoaderCircle className="spin" size={14} />{t('正在打开邮件…')}</div>}
-      {(loading || detailLoading) && !messages.length ? (
-        <div className="empty-state"><LoaderCircle className="spin" size={20} />{t('正在读取 iCloud 邮件…')}</div>
-      ) : (
-        <div className="message-list">
-          {messages.map((message) => {
-            const code = extractVerificationCode(message.subject, message.preview)
-            return <div className="message-list-item" key={message.id}>
-              <button className="message-open-button" type="button"
-                onClick={() => void openMessage(message)}>
-                <span className="unread-dot" /><span className="message-copy">
-                  <strong>{message.from || t('未知发件人')}</strong>
-                  <b>{message.subject || t('（无主题）')}</b>
-                  <small>{message.preview || t('暂无预览')}</small>
-                </span><time>{formatDate(message.date)}</time>
-              </button>
-              <PanelVerificationCode code={code} onCopy={props.onCopyVerificationCode}
-                onFill={props.onFillVerificationCode} />
-            </div>
-          })}
-          {!messages.length && !error && <div className="empty-state"><Inbox size={23} />
-            <strong>{t('最近 7 天没有来信')}</strong><span>{t('可切换隐藏地址或稍后手动刷新。')}</span></div>}
-        </div>
-      )}
-      <div className="icloud-inbox-footer"><span>{t(method === 'imap' ? 'IMAP 完整邮件' : 'iCloud Web 摘要')}</span>
+      {!readsMail ? (
+        // Messages and errors still in state belong to the previously selected account.
+        <div className="message-list"><div className="empty-state"><KeyRound size={23} />
+          <strong>{t('这个账号还不能收信')}</strong>
+          <span>{t('只登录了 Apple Account 的账号可以创建隐藏邮箱；在网页端配置应用专用密码或 Cookie 后才能在 Float 中收信。')}</span>
+        </div></div>
+      ) : <>
+        {error && <div className="icloud-inline-error" role="alert">{error}<button type="button" onClick={() => void loadMessages()}>{t('重试')}</button></div>}
+        {detailLoading && <div className="icloud-detail-loading" role="status">
+          <LoaderCircle className="spin" size={14} />{t('正在打开邮件…')}</div>}
+        {(loading || detailLoading) && !messages.length ? (
+          <div className="empty-state"><LoaderCircle className="spin" size={20} />{t('正在读取 iCloud 邮件…')}</div>
+        ) : (
+          <div className="message-list">
+            {messages.map((message) => {
+              const code = extractVerificationCode(message.subject, message.preview)
+              return <div className="message-list-item" key={message.id}>
+                <button className="message-open-button" type="button"
+                  onClick={() => void openMessage(message)}>
+                  <span className="unread-dot" /><span className="message-copy">
+                    <strong>{message.from || t('未知发件人')}</strong>
+                    <b>{message.subject || t('（无主题）')}</b>
+                    <small>{message.preview || t('暂无预览')}</small>
+                  </span><time>{formatDate(message.date)}</time>
+                </button>
+                <PanelVerificationCode code={code} onCopy={props.onCopyVerificationCode}
+                  onFill={props.onFillVerificationCode} />
+              </div>
+            })}
+            {!messages.length && !error && <div className="empty-state"><Inbox size={23} />
+              <strong>{t('最近 7 天没有来信')}</strong><span>{t('可切换隐藏地址或稍后手动刷新。')}</span></div>}
+          </div>
+        )}
+      </>}
+      <div className="icloud-inbox-footer"><span>{readsMail && t(method === 'imap' ? 'IMAP 完整邮件' : 'iCloud Web 摘要')}</span>
         <button type="button" onClick={props.onOpenWeb}>{t('打开完整网页端')}</button></div>
     </section>
   )

@@ -318,11 +318,15 @@ class MailRepository(
     suspend fun previewICloudAlias(accountId: String): ICloudAliasPreview =
         authorized { baseUrl, token -> service.previewICloudAlias(baseUrl, token, accountId) }
 
+    /**
+     * [email] and [previewId] reserve an address previewed on the cookie channel;
+     * without them the Worker creates through the Apple Account session.
+     */
     suspend fun createICloudAlias(
         accountId: String,
         label: String,
-        email: String,
-        previewId: String,
+        email: String? = null,
+        previewId: String? = null,
     ): ICloudAlias = authorized { baseUrl, token ->
         service.createICloudAlias(
             baseUrl,

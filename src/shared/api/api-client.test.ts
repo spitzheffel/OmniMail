@@ -62,4 +62,13 @@ describe('API request timeouts', () => {
 
     expect(timeout).toHaveBeenCalledWith(30_000)
   })
+
+  it('keeps the server\'s stable error code for callers that react to it', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json(
+      { error: '登录挑战已过期，请重新开始。', code: 'apple_login_challenge_gone' }, { status: 410 },
+    )))
+
+    await expect(api.completeICloudAppleAccountLogin('account-1', 'challenge-1', '123456'))
+      .rejects.toMatchObject({ status: 410, code: 'apple_login_challenge_gone' })
+  })
 })

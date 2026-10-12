@@ -319,7 +319,7 @@ test('keeps the alias error when a search takes over loading the inbox', async (
 test('lists an expired Apple-only session so its rejection is shown', async ({ page }) => {
   await mockICloud(page, {
     hasAppPassword: false, hasAppleAccount: true, appleAccountStatus: 'expired', quota: { web: null },
-    aliasListError: 'Apple Account 管理态已失效，请重新导入登录态。',
+    aliasListError: 'Apple Account 管理态已失效，请重新登录。',
   })
   await page.goto('/icloud')
 
@@ -440,13 +440,19 @@ test('finishes the rest of the batch after one alias fails', async ({ page }) =>
   await expect(dialog.locator('.icloud-alias-preview.is-error')).toHaveCount(1)
   expect(state.createdLabels).toEqual(['ONE', 'TWO', 'FOUR'])
 
-  // 继续创建 brings back only the card that did not go through, label and
-  // reserved address intact; the three created ones must not be replayed.
+  // 继续创建 brings back only the card that did not go through, with its label
+  // and the reason; the three created ones must not be replayed.
   await dialog.getByRole('button', { name: '继续创建' }).click()
   await expect(dialog.locator('.icloud-alias-preview')).toHaveCount(1)
   await expect(dialog.getByRole('textbox', { name: '用途标签（可选）' })).toHaveValue('THREE')
-  await expect(dialog.getByText('github-2@icloud.com', { exact: true })).toBeVisible()
-  await expect(dialog.getByRole('button', { name: '创建 1 个' })).toBeEnabled()
+  await expect(dialog.locator('.icloud-alias-preview')).toContainText('iCloud 暂时无法创建这个地址。')
+  // The address Apple refused is gone, so the retry asks for a fresh one
+  // instead of offering Apple the same address again.
+  await expect(dialog.getByText('github-2@icloud.com', { exact: true })).toHaveCount(0)
+  await dialog.getByRole('button', { name: '创建 1 个' }).click()
+  await expect(dialog.getByText('成功 1 个，失败 0 个。')).toBeVisible()
+  expect(state.createdLabels).toEqual(['ONE', 'TWO', 'FOUR', 'THREE'])
+  expect(state.createdEmails.at(-1)).toBe('github-4@icloud.com')
 })
 
 test('creates a numbered batch through the Apple Account channel', async ({ page }) => {
@@ -496,7 +502,11 @@ test('spills to the cookie channel once the Apple budget runs out', async ({ pag
   await dialog.getByRole('button', { name: '创建 4 个' }).click()
 
   await expect(dialog.getByText('成功 4 个，失败 0 个。')).toBeVisible()
-  // Planned up front from the quota, so no Apple request is wasted.
+  // Planned up front from the quota, so no Apple request is wasted. The aliases
+  // alone cannot show that: auto reroutes a refused item to the cookie channel
+  // and ends with the same four, so count the requests themselves.
+  expect(state.quotaRejections).toEqual([])
+  expect(state.createAttempts()).toBe(4)
   expect(state.createdChannels).toEqual([
     'apple_account', 'apple_account', 'icloud_web', 'icloud_web',
   ])

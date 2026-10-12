@@ -3,14 +3,22 @@ import type { ICloudAliasChannel, ICloudAliasQuotaChannel } from '../../../share
 import {
   accountChannelAvailability,
   aliasBatchLabel,
+  aliasItemHeadline,
   availableChannels,
   batchSummary,
   buildAliasBatch,
+  draftsAfterRun,
+  exhaustedResetAt,
   hasUsableAliasChannel,
+  newAliasDraft,
   planAliasBatch,
+  quotaRefreshDelay,
   remainingFor,
+  shouldResyncAfterRun,
   type AliasBatchItem,
   type AliasChannelAccount,
+  type AliasDraft,
+  type AliasItemStatus,
 } from './icloud-alias-batch'
 import { runAliasBatch, type AliasBatchApi } from './icloud-alias-batch-run'
 
@@ -47,6 +55,15 @@ describe('account channel availability', () => {
     expect(hasUsableAliasChannel(
       channels({ hasAppleAccount: true, appleAccountStatus: 'expired', hasCookies: true }),
     )).toBe(true)
+  })
+
+  it('drops a cookie jar Apple has rejected, as the server does', () => {
+    // The quota endpoint stops offering it too; planning onto it would only
+    // replay the same credential failure once per item.
+    expect(accountChannelAvailability(channels({ hasCookies: true, status: 'active' })).icloud_web).toBe(true)
+    expect(accountChannelAvailability(channels({ hasCookies: true, status: 'error' })).icloud_web).toBe(false)
+    expect(hasUsableAliasChannel(channels({ hasCookies: true, status: 'error' }))).toBe(false)
+    expect(hasUsableAliasChannel(channels({ hasCookies: true, status: 'error', hasAppleAccount: true }))).toBe(true)
   })
 })
 
@@ -117,8 +134,105 @@ describe('batchSummary', () => {
       { status: 'success', channel: 'icloud_web' },
       { status: 'error', channel: 'apple_account' },
       { status: 'skipped', channel: 'icloud_web' },
+      { status: 'unknown', channel: 'apple_account' },
     ] as AliasBatchItem[]
-    expect(batchSummary(items)).toEqual({ success: 2, failed: 1, skipped: 1, apple: 1, web: 1 })
+    expect(batchSummary(items)).toEqual({ success: 2, failed: 1, skipped: 1, unknown: 1, apple: 1, web: 1 })
+  })
+})
+
+describe('aliasItemHeadline', () => {
+  it('waits for Apple only while the item can still produce an address', () => {
+    expect(aliasItemHeadline({ email: '', label: '', status: 'pending' })).toBe('等待 Apple 生成地址')
+    expect(aliasItemHeadline({ email: '', label: '', status: 'running' })).toBe('等待 Apple 生成地址')
+    // Ended without an address: the badge says failed or skipped, and for a
+    // cookie item whose preview failed Apple was never the one being waited on.
+    expect(aliasItemHeadline({ email: '', label: '', status: 'error' })).toBe('未创建')
+    expect(aliasItemHeadline({ email: '', label: '', status: 'skipped' })).toBe('未创建')
+    expect(aliasItemHeadline({ email: '', label: '', status: 'unknown' })).toBe('地址未知')
+  })
+
+  it('leads with the address, then the label', () => {
+    expect(aliasItemHeadline({ email: 'a@icloud.com', label: 'Shop', status: 'error' })).toBe('a@icloud.com')
+    expect(aliasItemHeadline({ email: '', label: 'Shop', status: 'skipped' })).toBe('Shop')
+  })
+})
+
+describe('draftsAfterRun', () => {
+  const card = (id: string): AliasDraft => ({
+    ...newAliasDraft(id), label: id.toUpperCase(), email: `${id}@icloud.com`, previewId: `p-${id}`,
+  })
+  const outcome = (id: string, status: AliasItemStatus, error = ''): AliasBatchItem => ({
+    id, label: '', channel: 'icloud_web', email: `${id}@icloud.com`, previewId: `p-${id}`, status, error,
+  })
+
+  it('drops created cards, and the reservation Apple refused while showing why', () => {
+    const next = draftsAfterRun([card('a'), card('b'), card('c')], [
+      outcome('a', 'success'),
+      outcome('b', 'error', 'iCloud 无法保留隐藏邮箱。'),
+      outcome('c', 'skipped', '已取消'),
+    ])
+
+    expect(next.map(({ id, label, email, previewId, error }) => ({ id, label, email, previewId, error }))).toEqual([
+      // A fresh address next time instead of the one Apple just turned down.
+      { id: 'b', label: 'B', email: '', previewId: '', error: 'iCloud 无法保留隐藏邮箱。' },
+      { id: 'c', label: 'C', email: 'c@icloud.com', previewId: 'p-c', error: '' },
+    ])
+  })
+
+  it('keeps the reservation of a card whose result never came', () => {
+    // The run may have reserved the address itself; re-sending that one cannot
+    // make a second alias if the first went through.
+    const next = draftsAfterRun([newAliasDraft('d')], [outcome('d', 'unknown', '请求超时')])
+
+    expect(next[0]).toMatchObject({ email: 'd@icloud.com', previewId: 'p-d', error: '请求超时' })
+  })
+})
+
+describe('shouldResyncAfterRun', () => {
+  const run = (status: AliasItemStatus, created: unknown[] = []) => ({
+    items: [{ status } as AliasBatchItem], created,
+  })
+
+  it('re-syncs after anything that may have changed the account', () => {
+    expect(shouldResyncAfterRun(run('success', [{}]))).toBe(true)
+    // Nothing to show, but the alias may exist, or the session was marked expired.
+    expect(shouldResyncAfterRun(run('unknown'))).toBe(true)
+    expect(shouldResyncAfterRun(run('error'))).toBe(true)
+    expect(shouldResyncAfterRun(run('skipped'))).toBe(false)
+  })
+})
+
+describe('quota reset timing', () => {
+  const resetsAt = '2026-10-10T10:00:00.000Z'
+  const now = Date.parse('2026-10-10T09:59:30.000Z')
+
+  it('re-reads just after a window something was spent from rolls over', () => {
+    expect(quotaRefreshDelay(quota({ remaining: 0, resetsAt }, { resetsAt }), now)).toBe(31_000)
+    expect(quotaRefreshDelay(quota({ resetsAt }, { remaining: 4, resetsAt }), now)).toBe(31_000)
+  })
+
+  it('leaves an untouched window, and the resetless fallback, alone', () => {
+    expect(quotaRefreshDelay(quota({ resetsAt }, { resetsAt }), now)).toBeUndefined()
+    expect(quotaRefreshDelay(quota({ remaining: 0 }, {}), now)).toBeUndefined()
+  })
+
+  it('backs off instead of spinning when the server still reports a past reset', () => {
+    expect(quotaRefreshDelay(quota({ remaining: 0, resetsAt }, {}), Date.parse(resetsAt) + 5_000))
+      .toBe(15_000)
+  })
+
+  it('never schedules past what setTimeout can hold', () => {
+    expect(quotaRefreshDelay(quota({ remaining: 0, resetsAt: '2099-01-01T00:00:00.000Z' }, {}), now))
+      .toBe(3_601_000)
+  })
+
+  it('names the reset only for a usable channel with nothing left', () => {
+    const later = '2026-10-10T11:00:00.000Z'
+    expect(exhaustedResetAt(quota({ remaining: 0, resetsAt }, { resetsAt: later })))
+      .toBe(Date.parse(resetsAt))
+    expect(exhaustedResetAt(quota({ remaining: 3, resetsAt }, { resetsAt }))).toBeUndefined()
+    expect(exhaustedResetAt(quota({ available: false, remaining: 0, resetsAt }, { resetsAt })))
+      .toBeUndefined()
   })
 })
 

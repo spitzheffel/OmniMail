@@ -4,12 +4,27 @@ import { errorMessage } from '../../../shared/api/errorMessage'
 import { isAliasQuotaRejection, newAliasDraft, type AliasDraft } from '../model/icloud-alias-batch'
 
 /**
+ * Every cookie-channel call writes the refreshed cookie jar back on the server,
+ * so two in flight make that a last-writer-wins race. The chain is per account
+ * and module-wide rather than per hook: a dialog closed mid-preview leaves its
+ * request running, and the next dialog, or the batch run, has to queue behind
+ * it instead of racing it.
+ */
+const cookieJarQueues = new Map<string, Promise<void>>()
+
+export function queueCookieJarCall<T>(accountId: string, call: () => Promise<T>): Promise<T> {
+  const result = (cookieJarQueues.get(accountId) || Promise.resolve()).then(call)
+  const tail = result.then(() => undefined, () => undefined)
+  cookieJarQueues.set(accountId, tail)
+  void tail.then(() => {
+    if (cookieJarQueues.get(accountId) === tail) cookieJarQueues.delete(accountId)
+  })
+  return result
+}
+
+/**
  * Preview drafts for the legacy cookie channel, where the suggested address is
  * real information worth showing before committing.
- *
- * Every preview writes the refreshed cookie jar back on the server, so requests
- * are chained one at a time; firing several in parallel makes that a
- * last-writer-wins race.
  */
 export function useICloudAliasDrafts(
   accountId: string,
@@ -32,11 +47,14 @@ export function useICloudAliasDrafts(
   budget.current = maximum
   const versions = useRef(new Map<string, number>())
   const inFlight = useRef(new Map<string, number>())
-  const queue = useRef<Promise<unknown>>(Promise.resolve())
   draftsRef.current = drafts
 
   const update = useCallback((id: string, patch: Partial<AliasDraft>) => {
     setDrafts((items) => items.map((item) => (item.id === id ? { ...item, ...patch } : item)))
+  }, [])
+
+  const invalidate = useCallback((id: string) => {
+    versions.current.set(id, (versions.current.get(id) || 0) + 1)
   }, [])
 
   const preview = useCallback((id: string) => {
@@ -44,8 +62,12 @@ export function useICloudAliasDrafts(
     versions.current.set(id, version)
     inFlight.current.set(id, (inFlight.current.get(id) || 0) + 1)
     update(id, { loading: true, error: '' })
-    const run = async () => {
+    return queueCookieJarCall(accountId, async () => {
       try {
+        // Invalidated while it waited (card removed, channel left, dialog
+        // closed): never send it. Checking only after the request still spends
+        // an Apple round-trip and a jar write on a result nobody will see.
+        if (versions.current.get(id) !== version) return
         const result = await api.previewICloudAlias(accountId)
         if (versions.current.get(id) !== version) return
         update(id, { email: result.email, previewId: result.previewId })
@@ -68,9 +90,7 @@ export function useICloudAliasDrafts(
           update(id, { loading: false })
         }
       }
-    }
-    queue.current = queue.current.then(run, run)
-    return queue.current
+    })
   }, [accountId, update])
 
   // The first preview and the invalidation that cancels it must live in one
@@ -105,30 +125,49 @@ export function useICloudAliasDrafts(
   }, [maximum, preview])
 
   const remove = useCallback((id: string) => {
-    versions.current.set(id, (versions.current.get(id) || 0) + 1)
+    const survivors = draftsRef.current.filter((draft) => draft.id !== id)
+    if (!survivors.length) return
+    invalidate(id)
+    // The mount effect previews firstDraftId whenever the channel is re-entered;
+    // left on a removed card, that is a real Apple preview no card can receive.
+    if (firstDraftId.current === id) firstDraftId.current = survivors[0].id
     setDrafts((items) => (items.length > 1 ? items.filter((item) => item.id !== id) : items))
-  }, [])
+  }, [invalidate])
+
+  /**
+   * Cap the cards at the budget. `add` caps only against the budget known at the
+   * time, and the real one can arrive later and be smaller: the surplus would be
+   * counted, submitted and skipped. Dropping it also cancels its queued previews.
+   */
+  const clamp = useCallback((limit: number) => {
+    const room = Math.max(1, limit)
+    const surplus = draftsRef.current.slice(room)
+    if (!surplus.length) return
+    for (const draft of surplus) invalidate(draft.id)
+    setDrafts((items) => items.slice(0, room))
+  }, [invalidate])
 
   const setLabel = useCallback((id: string, label: string) => {
     update(id, { label: label.slice(0, 80) })
   }, [update])
 
   /**
-   * Keep only the listed drafts. After a batch the created cards already exist
-   * upstream and their previewId is spent, so bringing them back would replay
-   * them on the next submit. No survivors reseeds one fresh card.
+   * Replace the cards after a batch with the ones still to create (see
+   * draftsAfterRun). Created cards already exist upstream and their previewId is
+   * spent, so bringing them back would replay them on the next submit. Nothing
+   * left reseeds one fresh card.
    */
-  const prune = useCallback((keep: Set<string>) => {
-    const survivors = draftsRef.current.filter((draft) => keep.has(draft.id))
+  const restore = useCallback((next: AliasDraft[]) => {
+    const kept = new Set(next.map((draft) => draft.id))
     for (const draft of draftsRef.current) {
-      if (!keep.has(draft.id)) versions.current.set(draft.id, (versions.current.get(draft.id) || 0) + 1)
+      if (!kept.has(draft.id)) invalidate(draft.id)
     }
     // The mount effect previews firstDraftId whenever the channel is re-entered;
-    // leaving it pointing at a pruned card would fire a real Apple preview whose
+    // leaving it pointing at a dropped card would fire a real Apple preview whose
     // result no card can receive.
-    if (survivors.length) {
-      firstDraftId.current = survivors[0].id
-      setDrafts(survivors)
+    if (next.length) {
+      firstDraftId.current = next[0].id
+      setDrafts(next)
       return
     }
     const fresh = newAliasDraft(crypto.randomUUID())
@@ -138,7 +177,10 @@ export function useICloudAliasDrafts(
     // disabled, so a preview here could only produce a failed round-trip and an
     // error card.
     if (budget.current > 0) void preview(fresh.id)
-  }, [preview])
+  }, [invalidate, preview])
 
-  return { drafts, preview, add, remove, prune, setLabel, busy: drafts.some((draft) => draft.loading) }
+  return {
+    drafts, preview, add, remove, clamp, restore, setLabel,
+    busy: drafts.some((draft) => draft.loading),
+  }
 }

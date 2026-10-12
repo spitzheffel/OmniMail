@@ -5,18 +5,17 @@ import {
 } from './icloud-credentials'
 import type {
   AppleAccountRead,
+  AppleAccountState,
   ICloudAccount,
   ICloudAccountRow,
   PublicICloudAccount,
 } from './icloud-types'
 import type { Env } from '../../app/types'
 
-const MAX_COOKIE_COUNT = 64
-const MAX_COOKIE_NAME_LENGTH = 128
-const MAX_COOKIE_VALUE_BYTES = 8 * 1024
-const MAX_COOKIE_HEADER_BYTES = 32 * 1024
-const COOKIE_NAME = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/
-const COOKIE_VALUE = /^[\x21\x23-\x2b\x2d-\x3a\x3c-\x5b\x5d-\x7e]+$/
+import { ICloudStoreError } from './icloud-store-error'
+
+export { parseICloudCookies } from './icloud-cookies'
+export { ICloudStoreError } from './icloud-store-error'
 
 type PublicICloudAccountRow = Omit<
   ICloudAccountRow,
@@ -27,83 +26,13 @@ type PublicICloudAccountRow = Omit<
   has_apple_account: number
 }
 
-export class ICloudStoreError extends Error {
-  constructor(readonly status: number, message: string) {
-    super(message)
-  }
-}
-
-function validatedCookies(entries: Array<[string, string]>): Record<string, string> {
-  if (!entries.length) throw new ICloudStoreError(400, 'Cookie 中没有可用值。')
-  if (entries.length > MAX_COOKIE_COUNT) {
-    throw new ICloudStoreError(400, `Cookie 数量不能超过 ${MAX_COOKIE_COUNT} 个。`)
-  }
-  const encoder = new TextEncoder()
-  let totalBytes = 0
-  const result: Record<string, string> = {}
-  for (const [rawName, rawValue] of entries) {
-    const name = rawName.trim()
-    const trimmedValue = rawValue.trim()
-    const value = trimmedValue.startsWith('"') && trimmedValue.endsWith('"')
-      ? trimmedValue.slice(1, -1)
-      : trimmedValue
-    const valueBytes = encoder.encode(value).byteLength
-    if (
-      !name
-      || name.length > MAX_COOKIE_NAME_LENGTH
-      || !COOKIE_NAME.test(name)
-      || !value
-      || valueBytes > MAX_COOKIE_VALUE_BYTES
-      || !COOKIE_VALUE.test(value)
-    ) throw new ICloudStoreError(400, 'Cookie 包含无效名称或值。')
-    // Includes `=`, quotes, and the `; ` separator used by the outbound header.
-    totalBytes += encoder.encode(name).byteLength + valueBytes + 5
-    result[name] = value
-  }
-  if (totalBytes > MAX_COOKIE_HEADER_BYTES) {
-    throw new ICloudStoreError(400, 'Cookie 总大小不能超过 32 KiB。')
-  }
-  return result
-}
-
-export function parseICloudCookies(raw: unknown): Record<string, string> {
-  if (raw && !Array.isArray(raw) && typeof raw === 'object') {
-    const entries = Object.entries(raw)
-    if (!entries.every((entry): entry is [string, string] => typeof entry[1] === 'string')) {
-      throw new ICloudStoreError(400, 'Cookie 包含无效名称或值。')
-    }
-    return validatedCookies(entries)
-  }
-  const value = typeof raw === 'string' ? raw.trim() : ''
-  if (!value) throw new ICloudStoreError(400, '请填写 iCloud Cookie。')
-  if (new TextEncoder().encode(value).byteLength > MAX_COOKIE_HEADER_BYTES) {
-    throw new ICloudStoreError(400, 'Cookie 总大小不能超过 32 KiB。')
-  }
-  if (value.startsWith('{')) {
-    try {
-      return parseICloudCookies(JSON.parse(value) as unknown)
-    } catch (error) {
-      if (error instanceof ICloudStoreError) throw error
-      throw new ICloudStoreError(400, 'Cookie JSON 格式无效。')
-    }
-  }
-  const entries = value.split(';').flatMap((item): Array<[string, string]> => {
-    const separator = item.indexOf('=')
-    if (separator < 1) return []
-    const name = item.slice(0, separator).trim()
-    const cookieValue = item.slice(separator + 1).trim()
-    return name && cookieValue ? [[name, cookieValue]] : []
-  })
-  if (!entries.length) throw new ICloudStoreError(400, '无法解析 iCloud Cookie。')
-  return validatedCookies(entries)
-}
-
 export function publicICloudAccount(account: ICloudAccount): PublicICloudAccount {
   const {
     cookies,
     appPassword,
     appleAccountState: _appleAccountState,
     appleAccountRead: _appleAccountRead,
+    cookiesRead: _cookiesRead,
     userId: _userId,
     ...safe
   } = account
@@ -144,14 +73,26 @@ function cookieJarText(cookies: Record<string, string>): string {
  * the server then refuses, so both read it from here.
  *
  * `expired` is not recoverable: it is written only when Apple rejects the
- * stored scnt outright, and refresh() replays those same credentials.
+ * stored scnt outright (after a refresh failed too), and refresh() replays
+ * those same credentials. A jar Apple rejected leaves the account in `error`;
+ * creating through it would only fail again, and the next listing that Apple
+ * accepts puts the account back to `active`.
  */
 export function iCloudAliasChannels(
-  account: Pick<ICloudAccount, 'cookies' | 'appleAccountState' | 'appleAccountStatus'>,
+  account: Pick<ICloudAccount, 'cookies' | 'status' | 'appleAccountState' | 'appleAccountStatus'>,
 ): { appleAccount: boolean; icloudWeb: boolean } {
   return {
     appleAccount: Boolean(account.appleAccountState) && account.appleAccountStatus !== 'expired',
-    icloudWeb: Object.keys(account.cookies).length > 0,
+    icloudWeb: Object.keys(account.cookies).length > 0 && account.status !== 'error',
+  }
+}
+
+function appleStateFrom(text: string): AppleAccountState | null {
+  if (!text) return null
+  try {
+    return JSON.parse(text) as AppleAccountState
+  } catch {
+    throw new ICloudStoreError(500, 'Apple Account 登录态已损坏。')
   }
 }
 
@@ -234,14 +175,7 @@ export class ICloudAccountStore {
          WHERE id = ? AND user_id = ? AND cookies_cipher = ?`,
       ).bind(row.id, this.userId, row.cookies_cipher).run().catch(() => undefined)
     }
-    let appleAccountState = null
-    if (appleStateText) {
-      try {
-        appleAccountState = JSON.parse(appleStateText)
-      } catch {
-        throw new ICloudStoreError(500, 'Apple Account 登录态已损坏。')
-      }
-    }
+    const appleAccountState = appleStateFrom(appleStateText)
     return {
       id: row.id,
       userId: row.user_id,
@@ -261,8 +195,73 @@ export class ICloudAccountStore {
       appleAccountExpiresAt: row.apple_account_expires_at,
       appleAccountError: row.apple_account_error,
       appleAccountRead: { cipher: row.apple_account_state_cipher, plaintext: appleStateText || '' },
+      cookiesRead: { cipher: row.cookies_cipher, plaintext: cookiesText || '' },
       createdAt: row.created_at,
     }
+  }
+
+  /**
+   * Only the Apple session columns, for a request that already holds the rest
+   * of the row: adopting the session inside the gate needs nothing else, and a
+   * full read would decrypt the jar and the app password for nothing.
+   */
+  async appleSession(id: string): Promise<Pick<ICloudAccount,
+    'appleAccountState' | 'appleAccountStatus' | 'appleAccountExpiresAt' | 'appleAccountError'
+    | 'appleAccountRead' | 'aliasTotal' | 'aliasActive'>> {
+    const row = await this.env.DB.prepare(
+      `SELECT apple_account_state_cipher, apple_account_status, apple_account_expires_at,
+              apple_account_error, alias_total, alias_active
+       FROM icloud_accounts WHERE id = ? AND user_id = ?`,
+    ).bind(id, this.userId).first<Pick<ICloudAccountRow,
+      'apple_account_state_cipher' | 'apple_account_status' | 'apple_account_expires_at'
+      | 'apple_account_error' | 'alias_total' | 'alias_active'>>()
+    if (!row) throw new ICloudStoreError(404, 'iCloud 账号不存在。')
+    const plaintext = await decryptICloudCredential(
+      this.env, row.apple_account_state_cipher, this.context(id, 'apple-account'),
+    )
+    return {
+      appleAccountState: appleStateFrom(plaintext),
+      appleAccountStatus: row.apple_account_status,
+      appleAccountExpiresAt: row.apple_account_expires_at,
+      appleAccountError: row.apple_account_error,
+      appleAccountRead: { cipher: row.apple_account_state_cipher, plaintext: plaintext || '' },
+      aliasTotal: Number(row.alias_total),
+      aliasActive: Number(row.alias_active),
+    }
+  }
+
+  /** The stored session's ciphertext, to tell whether anything replaced it since a read. */
+  async appleSessionCipher(id: string): Promise<string> {
+    const row = await this.env.DB.prepare(
+      'SELECT apple_account_state_cipher FROM icloud_accounts WHERE id = ? AND user_id = ?',
+    ).bind(id, this.userId).first<Pick<ICloudAccountRow, 'apple_account_state_cipher'>>()
+    return row?.apple_account_state_cipher ?? ''
+  }
+
+  /**
+   * Another account of this user that already creates aliases as `appleId`:
+   * through a cookie jar validated for it, or an Apple session signed in as it.
+   * The hourly quota is kept per account, so a second account on the same
+   * Apple ID would double the budget Apple enforces once. Returns its name.
+   */
+  async appleIdOwner(appleId: string, exceptId: string): Promise<string> {
+    const wanted = appleId.trim().toLowerCase()
+    if (!wanted) return ''
+    const { results } = await this.env.DB.prepare(
+      `SELECT id, name, real_email, cookies_cipher, apple_account_state_cipher
+       FROM icloud_accounts WHERE user_id = ? AND id <> ?`,
+    ).bind(this.userId, exceptId).all<Pick<ICloudAccountRow,
+      'id' | 'name' | 'real_email' | 'cookies_cipher' | 'apple_account_state_cipher'>>()
+    for (const row of results) {
+      if (row.cookies_cipher && row.real_email.trim().toLowerCase() === wanted) return row.name
+      if (!row.apple_account_state_cipher) continue
+      const plaintext = await decryptICloudCredential(
+        this.env, row.apple_account_state_cipher, this.context(row.id, 'apple-account'),
+      ).catch(() => '')
+      const state = plaintext ? appleStateFrom(plaintext) : null
+      if (state?.appleId?.trim().toLowerCase() === wanted) return row.name
+    }
+    return ''
   }
 
   async list(): Promise<PublicICloudAccount[]> {
@@ -362,34 +361,77 @@ export class ICloudAccountStore {
   }
 
   /**
-   * Session state only. The counters are deliberately absent: every caller
-   * holds an account read before its network round-trip, so writing their
-   * snapshot here would revert an addAliasSummary a concurrent create landed in
-   * the meantime — including the create this very call is reporting on. Callers
-   * that just read Apple's authoritative list persist it via saveAliasSummary.
+   * What a request did with the jar it read: the cookies Apple rotated and the
+   * jar's health. Session state only. The counters are deliberately absent:
+   * every caller holds an account read before its network round-trip, so
+   * writing their snapshot here would revert an addAliasSummary a concurrent
+   * create landed in the meantime — including the create this very call is
+   * reporting on. The addresses are absent for the same reason: an app-password
+   * update that lands meanwhile owns icloud_email. Callers that just read
+   * Apple's authoritative list persist it via saveAliasSummary.
+   *
+   * Written only while the stored jar is still the one read, like
+   * advanceAppleAccountState: a jar the user pasted meanwhile must not be
+   * replaced by this older one, nor marked broken because the older one failed.
+   * An unchanged jar keeps its ciphertext, so overlapping requests that rotated
+   * nothing do not invalidate each other's version. Returns whether it wrote.
    */
-  async saveCookies(account: ICloudAccount): Promise<void> {
-    const cipher = await encryptICloudCredential(
-      this.env,
-      cookieJarText(account.cookies),
-      this.context(account.id, 'cookies'),
-    )
-    await this.env.DB.prepare(
-      `UPDATE icloud_accounts SET
-        cookies_cipher = ?, real_email = ?, icloud_email = ?, status = ?,
-        last_validated = ?, last_error = ?,
-        updated_at = ? WHERE id = ? AND user_id = ?`,
+  async saveCookies(account: ICloudAccount): Promise<boolean> {
+    const read = account.cookiesRead
+    const plaintext = cookieJarText(account.cookies)
+    const cipher = read && read.plaintext === plaintext
+      ? read.cipher
+      : await encryptICloudCredential(this.env, plaintext, this.context(account.id, 'cookies'))
+    const result = await this.env.DB.prepare(
+      `UPDATE icloud_accounts SET cookies_cipher = ?, status = ?, last_validated = ?, last_error = ?,
+        updated_at = ? WHERE id = ? AND user_id = ?${read ? ' AND cookies_cipher = ?' : ''}`,
     ).bind(
       cipher,
-      account.realEmail,
-      account.icloudEmail,
       account.status,
       account.lastValidated,
       account.lastError,
       new Date().toISOString(),
       account.id,
       this.userId,
+      ...(read ? [read.cipher] : []),
     ).run()
+    if (!result.meta.changes) return false
+    account.cookiesRead = { cipher, plaintext }
+    return true
+  }
+
+  /**
+   * A jar the user just supplied, with what validating it found. Replaces
+   * whatever is stored. The iCloud address is only filled in when none is set:
+   * the app password owns it once configured.
+   */
+  async replaceCookies(account: ICloudAccount): Promise<void> {
+    const plaintext = cookieJarText(account.cookies)
+    const cipher = await encryptICloudCredential(this.env, plaintext, this.context(account.id, 'cookies'))
+    const result = await this.env.DB.prepare(
+      `UPDATE icloud_accounts SET cookies_cipher = ?, real_email = ?,
+        icloud_email = CASE WHEN icloud_email = '' THEN ? ELSE icloud_email END,
+        status = ?, last_validated = ?, last_error = ?, updated_at = ?
+       WHERE id = ? AND user_id = ?`,
+    ).bind(
+      cipher, account.realEmail, account.icloudEmail, account.status, account.lastValidated,
+      account.lastError, new Date().toISOString(), account.id, this.userId,
+    ).run()
+    if (!result.meta.changes) throw new ICloudStoreError(404, 'iCloud 账号不存在。')
+    account.cookiesRead = { cipher, plaintext }
+  }
+
+  /**
+   * An account added through the Apple Account sign-in alone starts out
+   * `pending`, and nothing else validates it: once Apple accepts its session it
+   * is as active as an account whose jar validated.
+   */
+  async promoteAppleOnly(id: string): Promise<void> {
+    await this.env.DB.prepare(
+      `UPDATE icloud_accounts SET status = 'active', last_validated = ?, last_error = '', updated_at = ?
+       WHERE id = ? AND user_id = ? AND status = 'pending'
+         AND cookies_cipher = '' AND app_password_cipher = '' AND apple_account_state_cipher <> ''`,
+    ).bind(new Date().toISOString(), new Date().toISOString(), id, this.userId).run()
   }
 
   async saveAppPassword(id: string, icloudEmail: string, password: string): Promise<void> {
@@ -539,12 +581,18 @@ export class ICloudAccountStore {
     ).bind(activeDelta, new Date().toISOString(), id, this.userId).run()
   }
 
+  /** Also drops a sign-in still waiting for its 2FA code, which would otherwise bring a session back. */
   async clearAppleAccountState(id: string): Promise<void> {
-    const result = await this.env.DB.prepare(
-      `UPDATE icloud_accounts SET apple_account_state_cipher = '',
-        apple_account_expires_at = '', apple_account_status = 'none', apple_account_error = '',
-        updated_at = ? WHERE id = ? AND user_id = ?`,
-    ).bind(new Date().toISOString(), id, this.userId).run()
+    const [result] = await this.env.DB.batch([
+      this.env.DB.prepare(
+        `UPDATE icloud_accounts SET apple_account_state_cipher = '',
+          apple_account_expires_at = '', apple_account_status = 'none', apple_account_error = '',
+          updated_at = ? WHERE id = ? AND user_id = ?`,
+      ).bind(new Date().toISOString(), id, this.userId),
+      this.env.DB.prepare(
+        'DELETE FROM icloud_auth_challenges WHERE account_id = ? AND user_id = ?',
+      ).bind(id, this.userId),
+    ])
     if (!result.meta.changes) throw new ICloudStoreError(404, 'iCloud 账号不存在。')
   }
 }

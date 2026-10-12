@@ -45,10 +45,17 @@ export type ICloudAliasQuotaRow = {
 }
 
 export type ICloudAliasClaim =
-  | { allowed: true; remaining: number }
+  /** `hourStartedAt` names the window the slot came from, for refunding it there. */
+  | { allowed: true; remaining: number; hourStartedAt: number }
   | { allowed: false; retryAfter: number }
 
 const TABLE = 'icloud_alias_create_limits'
+/**
+ * What exhaustICloudAliasChannel writes: far past any limit, so the refund of a
+ * request that was in flight when Apple reported its cap cannot reopen a slot
+ * in a window Apple has closed. Reads clamp `used` to the limit.
+ */
+const EXHAUSTED_COUNT = 1_000_000
 
 function nowSeconds(): number {
   return Math.floor(Date.now() / 1000)
@@ -77,8 +84,8 @@ export function iCloudAliasQuotaState(
   const startedAt = hourStart(now)
   return ICLOUD_ALIAS_CHANNELS.map((channel) => {
     const row = rows.find((item) => item.channel === channel)
-    const used = row && row.hour_started_at === startedAt ? Math.max(0, row.hour_count) : 0
     const limit = iCloudAliasChannelLimit(channel, limits)
+    const used = row && row.hour_started_at === startedAt ? Math.min(limit, Math.max(0, row.hour_count)) : 0
     return {
       channel,
       limit,
@@ -110,6 +117,10 @@ export async function readICloudAliasQuota(
  * The reservation is taken before Apple is called, so a burst cannot exceed the
  * budget. Callers must refund with releaseICloudAliasCreate() when the attempt
  * provably never reached Apple's create endpoint.
+ *
+ * A window only moves forward: a claim stamped just before the hour that
+ * reaches D1 after the next one opened must not roll the row back and forget
+ * that hour's claims. It is refused instead, its own hour being over.
  */
 export async function claimICloudAliasCreate(
   db: D1Database,
@@ -135,56 +146,59 @@ export async function claimICloudAliasCreate(
          ELSE 1
        END,
        updated_at = excluded.updated_at
-     WHERE ${TABLE}.hour_started_at != excluded.hour_started_at
-        OR ${TABLE}.hour_count < ?
+     WHERE ${TABLE}.hour_started_at < excluded.hour_started_at
+        OR (${TABLE}.hour_started_at = excluded.hour_started_at AND ${TABLE}.hour_count < ?)
      RETURNING hour_count`,
   ).bind(userId, accountId, channel, startedAt, now, limit).first<{ hour_count: number }>()
-  // No row means the guard rejected the upsert, which can only happen when the
-  // window is current and already full, so the reset time is deterministic.
+  // No row means the guard rejected the upsert: the window is current and
+  // already full, or this request's hour is already over. Either way the
+  // request's hour is what it waits out.
   if (!row) {
     return { allowed: false, retryAfter: Math.max(1, startedAt + ICLOUD_ALIAS_HOUR_SECONDS - now) }
   }
-  return { allowed: true, remaining: Math.max(0, limit - row.hour_count) }
+  return { allowed: true, remaining: Math.max(0, limit - row.hour_count), hourStartedAt: startedAt }
 }
 
-/** Give back a reservation for an attempt that never reached Apple. */
+/**
+ * Give back a reservation for an attempt that never reached Apple, in the
+ * window it was taken from: by the time the attempt fails the hour may have
+ * turned, and decrementing the new one would hand out a slot it never spent.
+ */
 export async function releaseICloudAliasCreate(
   db: D1Database,
   userId: string,
   accountId: string,
   channel: ICloudAliasChannel,
+  claimedHour: number,
   now = nowSeconds(),
 ): Promise<void> {
   await db.prepare(
     `UPDATE ${TABLE} SET hour_count = hour_count - 1, updated_at = ?
        WHERE account_id = ? AND channel = ? AND user_id = ?
          AND hour_started_at = ? AND hour_count > 0`,
-  ).bind(now, accountId, channel, userId, hourStart(now)).run()
+  ).bind(now, accountId, channel, userId, claimedHour).run()
 }
 
-/** Saturate the current window after Apple answered with its own limit error. */
+/**
+ * Saturate the current window after Apple answered with its own limit error.
+ * Like a claim, it never rolls a newer window back.
+ */
 export async function exhaustICloudAliasChannel(
   db: D1Database,
   userId: string,
   accountId: string,
   channel: ICloudAliasChannel,
   now = nowSeconds(),
-  limits?: ICloudAliasQuotaOverrides,
 ): Promise<void> {
-  const startedAt = hourStart(now)
-  const limit = iCloudAliasChannelLimit(channel, limits)
   await db.prepare(
     `INSERT INTO ${TABLE} (user_id, account_id, channel, hour_started_at, hour_count, updated_at)
      VALUES (?, ?, ?, ?, ?, ?)
      ON CONFLICT(account_id, channel) DO UPDATE SET
        hour_started_at = excluded.hour_started_at,
-       hour_count = CASE
-         WHEN ${TABLE}.hour_started_at = excluded.hour_started_at
-           THEN MAX(${TABLE}.hour_count, excluded.hour_count)
-         ELSE excluded.hour_count
-       END,
-       updated_at = excluded.updated_at`,
-  ).bind(userId, accountId, channel, startedAt, limit, now).run()
+       hour_count = excluded.hour_count,
+       updated_at = excluded.updated_at
+     WHERE ${TABLE}.hour_started_at <= excluded.hour_started_at`,
+  ).bind(userId, accountId, channel, hourStart(now), EXHAUSTED_COUNT, now).run()
 }
 
 /** Our own quota rejection — distinct from Apple's upstream limit codes. */

@@ -20,6 +20,7 @@ import type {
   YandexMailMessageDetail,
   YandexMailMessageSummary,
 } from '../../src/shared/api/api-types'
+import { iCloudAccountAddress } from './icloud-accounts'
 import {
   getIndexedSourceAdapter,
   INDEXED_SOURCE_IDS,
@@ -144,7 +145,9 @@ function iCloudAccounts(accounts: ICloudAccount[]): MailSourceDescriptor {
     accounts: accounts.map((account) => ({
       id: account.id,
       name: account.name,
-      email: account.realEmail || account.icloudEmail || account.host,
+      // '' for an Apple-Account-only account: consumers then say there is no
+      // address instead of offering the region host to copy or fill.
+      email: iCloudAccountAddress(account),
       status: account.status === 'pending'
         ? 'syncing'
         : account.status === 'active' ? 'active' : 'error',

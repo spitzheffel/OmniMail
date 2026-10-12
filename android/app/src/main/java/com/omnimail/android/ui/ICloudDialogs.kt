@@ -218,9 +218,14 @@ internal fun ICloudAccountDialog(
     }
 }
 
+/**
+ * Deactivate, reactivate and delete exist only on the cookie channel and need
+ * Apple's anonymousId; without [canManage] the dialog only copies the address.
+ */
 @Composable
 internal fun ICloudAliasDialog(
     alias: ICloudAlias,
+    canManage: Boolean,
     working: Boolean,
     onDismiss: () -> Unit,
     onToggle: ((Boolean) -> Unit) -> Unit,
@@ -248,22 +253,24 @@ internal fun ICloudAliasDialog(
                     Spacer(Modifier.width(8.dp))
                     Text(stringResource(R.string.icloud_copy_alias))
                 }
-                OutlinedButton(
-                    onClick = {
-                        saving = true
-                        onToggle { saving = false }
-                    },
-                    enabled = !busy,
-                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
-                ) {
-                    Text(stringResource(if (alias.active) R.string.icloud_deactivate_alias else R.string.icloud_reactivate_alias))
-                }
-                TextButton(
-                    onClick = { confirmDelete = true },
-                    enabled = !busy,
-                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
-                ) {
-                    Text(stringResource(R.string.icloud_delete_alias), color = MaterialTheme.colorScheme.error)
+                if (canManage) {
+                    OutlinedButton(
+                        onClick = {
+                            saving = true
+                            onToggle { saving = false }
+                        },
+                        enabled = !busy,
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                    ) {
+                        Text(stringResource(if (alias.active) R.string.icloud_deactivate_alias else R.string.icloud_reactivate_alias))
+                    }
+                    TextButton(
+                        onClick = { confirmDelete = true },
+                        enabled = !busy,
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                    ) {
+                        Text(stringResource(R.string.icloud_delete_alias), color = MaterialTheme.colorScheme.error)
+                    }
                 }
             }
         },
@@ -303,9 +310,15 @@ private data class AliasDraftUi(
     val error: String = "",
 )
 
+/**
+ * [needsPreview] is false for an account that creates through its Apple Account
+ * session: there is no cookie jar to preview with, so cards carry only a label
+ * and Apple assigns each address when it is created.
+ */
 @Composable
 internal fun ICloudAliasBatchDialog(
     cloud: ICloudUiState,
+    needsPreview: Boolean,
     onDismiss: () -> Unit,
     onPreview: ((ICloudAliasPreview?, String?) -> Unit) -> Unit,
     onCreate: (List<ICloudAliasCandidate>, (Int, String?) -> Unit) -> Unit,
@@ -323,6 +336,7 @@ internal fun ICloudAliasBatchDialog(
     )
 
     fun preview(key: Long) {
+        if (!needsPreview) return
         drafts = drafts.map { if (it.key == key) it.copy(loading = true, error = "") else it }
         onPreview { result, error ->
             drafts = drafts.map {
@@ -350,7 +364,9 @@ internal fun ICloudAliasBatchDialog(
                 Text(stringResource(R.string.icloud_create_alias), style = MaterialTheme.typography.headlineSmall)
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    stringResource(R.string.icloud_batch_detail),
+                    stringResource(
+                        if (needsPreview) R.string.icloud_batch_detail else R.string.icloud_batch_detail_apple,
+                    ),
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     style = MaterialTheme.typography.bodyMedium,
                 )
@@ -383,12 +399,14 @@ internal fun ICloudAliasBatchDialog(
                                         Modifier.weight(1f),
                                         fontWeight = FontWeight.SemiBold,
                                     )
-                                    IconButton(
-                                        onClick = { preview(draft.key) },
-                                        enabled = drafts.none { it.loading } && !cloud.isWorking,
-                                    ) {
-                                        if (draft.loading) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
-                                        else LineIcon(AppIcon.Refresh, stringResource(R.string.icloud_change_candidate))
+                                    if (needsPreview) {
+                                        IconButton(
+                                            onClick = { preview(draft.key) },
+                                            enabled = drafts.none { it.loading } && !cloud.isWorking,
+                                        ) {
+                                            if (draft.loading) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                                            else LineIcon(AppIcon.Refresh, stringResource(R.string.icloud_change_candidate))
+                                        }
                                     }
                                     if (drafts.size > 1) {
                                         IconButton(
@@ -404,7 +422,12 @@ internal fun ICloudAliasBatchDialog(
                                     }
                                 }
                                 Text(
-                                    draft.email.ifBlank { stringResource(R.string.icloud_generating_candidate) },
+                                    draft.email.ifBlank {
+                                        stringResource(
+                                            if (needsPreview) R.string.icloud_generating_candidate
+                                            else R.string.icloud_apple_assigns_address,
+                                        )
+                                    },
                                     style = MaterialTheme.typography.bodyMedium,
                                     fontWeight = FontWeight.Medium,
                                 )
@@ -494,7 +517,9 @@ internal fun ICloudAliasBatchDialog(
                                 }
                             }
                         },
-                        enabled = drafts.all { it.email.isNotBlank() && it.previewId.isNotBlank() && !it.loading } && !cloud.isWorking,
+                        enabled = drafts.all {
+                            !it.loading && (!needsPreview || (it.email.isNotBlank() && it.previewId.isNotBlank()))
+                        } && !cloud.isWorking,
                     ) { Text(stringResource(R.string.icloud_create_count, drafts.size)) }
                 }
             }

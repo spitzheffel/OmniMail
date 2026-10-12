@@ -1,5 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ICloudAccount, ICloudAlias } from '../../src/shared/api/api-types'
+import {
+  iCloudAliasAccounts,
+  type ICloudAliasUnavailableReason,
+  withCreatedICloudAlias,
+} from './icloud-accounts'
 import { sendExtensionMessage } from './protocol'
 
 interface Options {
@@ -18,6 +23,7 @@ export function usePanelICloud({ active, authorized, enabled, onError, onNotice 
   const accountsRequest = useRef(0)
   const aliasesRequest = useRef(0)
   const [accounts, setAccounts] = useState<ICloudAccount[]>([])
+  const [unavailableReason, setUnavailableReason] = useState<ICloudAliasUnavailableReason | null>(null)
   const [accountsLoaded, setAccountsLoaded] = useState(false)
   const [accountId, setAccountId] = useState('')
   const [aliases, setAliases] = useState<ICloudAlias[]>([])
@@ -26,7 +32,11 @@ export function usePanelICloud({ active, authorized, enabled, onError, onNotice 
   const [loadingAliases, setLoadingAliases] = useState(false)
   const [creating, setCreating] = useState(false)
 
-  const loadAliases = useCallback(async (nextAccountId: string, preferredAlias = '') => {
+  const loadAliases = useCallback(async (
+    nextAccountId: string,
+    preferredAlias = '',
+    created?: ICloudAlias,
+  ) => {
     const requestId = ++aliasesRequest.current
     if (!nextAccountId) {
       setAliases([])
@@ -43,7 +53,10 @@ export function usePanelICloud({ active, authorized, enabled, onError, onNotice 
         chrome.storage.local.get(['lastICloudAlias']),
       ])
       if (requestId !== aliasesRequest.current) return
-      const nextAliases = result.aliases.filter((alias) => alias.active)
+      const nextAliases = withCreatedICloudAlias(
+        result.aliases.filter((alias) => alias.active),
+        created,
+      )
       const savedAlias = typeof saved.lastICloudAlias === 'string' ? saved.lastICloudAlias : ''
       const candidate = preferredAlias || savedAlias
       const nextAlias = nextAliases.some((alias) => alias.email === candidate)
@@ -69,12 +82,13 @@ export function usePanelICloud({ active, authorized, enabled, onError, onNotice 
         chrome.storage.local.get(['lastICloudAccount']),
       ])
       if (requestId !== accountsRequest.current) return
-      const nextAccounts = result.accounts.filter((account) => account.hasCookies)
+      const { accounts: nextAccounts, unavailableReason: reason } = iCloudAliasAccounts(result.accounts)
       const savedId = typeof saved.lastICloudAccount === 'string' ? saved.lastICloudAccount : ''
       const nextId = nextAccounts.some((account) => account.id === savedId)
         ? savedId
         : nextAccounts[0]?.id || ''
       setAccounts(nextAccounts)
+      setUnavailableReason(reason)
       setAccountId(nextId)
       setAccountsLoaded(true)
       await loadAliases(nextId)
@@ -99,6 +113,7 @@ export function usePanelICloud({ active, authorized, enabled, onError, onNotice 
     accountsRequest.current += 1
     aliasesRequest.current += 1
     setAccounts([])
+    setUnavailableReason(null)
     setAliases([])
     setAccountId('')
     setSelectedAlias('')
@@ -125,7 +140,9 @@ export function usePanelICloud({ active, authorized, enabled, onError, onNotice 
       const result = await sendExtensionMessage<{
         alias: Pick<ICloudAlias, 'email' | 'label' | 'createdAt'>
       }>({ type: 'api:create-icloud-alias', accountId, label: label.trim() })
-      await loadAliases(accountId, result.alias.email)
+      await loadAliases(accountId, result.alias.email, {
+        ...result.alias, anonymousId: '', active: true,
+      })
       onNotice('iCloud 隐藏邮箱已生成')
       return result.alias.email
     } catch (error) {
@@ -144,6 +161,7 @@ export function usePanelICloud({ active, authorized, enabled, onError, onNotice 
     loadingAccounts,
     loadingAliases,
     selectedAlias,
+    unavailableReason,
     createAlias,
     loadAccounts,
     loadAliases: () => loadAliases(accountId, selectedAlias),

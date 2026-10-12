@@ -3,12 +3,23 @@ import {
   APPLE_ACCOUNT_ERROR_CODES,
   ICLOUD_CREDENTIAL_ERROR_STATUS,
   ICloudRemoteError,
+  iCloudHmeLimitReason,
 } from './icloud-apple'
 
 export const APPLE_ACCOUNT_REQUEST_TIMEOUT_MS = 20_000
-const APPLE_ACCOUNT_ORIGIN = 'https://account.apple.com'
+// When the token response does not say how long the session lives, assume a
+// short life rather than none: an empty expiry makes the very next call refresh
+// again, and on the create path that second refresh runs after the hourly slot
+// was claimed.
+const APPLE_ACCOUNT_DEFAULT_SESSION_MS = 5 * 60_000
+// Refresh a little before the advertised expiry, so a call does not start on a
+// session that lapses while it is in flight.
+const APPLE_ACCOUNT_EXPIRY_MARGIN_MS = 30_000
+// The calls that create an address, where a bare 429 is the hourly cap.
+const METERED_PATHS = new Set(['/account/manage/email/private/add', '/account/manage/email/private/add/complete'])
+export const APPLE_ACCOUNT_ORIGIN = 'https://account.apple.com'
 const APPLE_ACCOUNT_HOST = 'appleid.apple.com'
-const APPLE_ACCOUNT_USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
+export const APPLE_ACCOUNT_USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
   + 'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36'
 
 function mergeSetCookies(cookies: Record<string, string>, headers: Headers): void {
@@ -74,32 +85,42 @@ function appleAccountBase(state: AppleAccountState): string {
     : APPLE_ACCOUNT_ORIGIN
 }
 
-function appleAccountCookieHeader(cookies: Record<string, string>): string {
+export function appleAccountCookieHeader(cookies: Record<string, string>): string {
   return Object.entries(cookies)
     .filter(([name, value]) => name && value)
     .map(([name, value]) => `${name}=${value}`)
     .join('; ')
 }
 
-function appleAccountResponseText(value: string): string {
-  const compact = value.replace(/[\r\n\t]+/g, ' ').trim()
-  if (!compact) return '空响应'
-  return compact.length > 500 ? `${compact.slice(0, 500)}…` : compact
+/**
+ * Apple's own wording, for `detail`: tags stripped, since a failure can come
+ * back as a whole HTML page, and short enough to read beside the message.
+ */
+function appleAccountResponseText(status: number, value: string): string {
+  const compact = value.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim()
+  const text = compact.length > 200 ? `${compact.slice(0, 200)}…` : compact
+  return text ? `HTTP ${status}: ${text}` : `HTTP ${status}`
 }
 
 /**
  * `optional` marks an endpoint some regions do not serve (the alias list): only
- * there does a missing endpoint mean `unavailable`. Everywhere else it is a
- * failure like any other, and the limit wording still wins over it.
+ * there does a missing endpoint mean `unavailable`. `metered` marks the calls
+ * that create an address: only there is a bare 429 the hourly cap; anywhere
+ * else it is Apple throttling that call. The cap's own wording wins everywhere.
  */
-function appleAccountErrorCode(status: number, text: string, optional = false): string {
+function appleAccountErrorCode(
+  status: number,
+  text: string,
+  { optional = false, metered = false }: { optional?: boolean; metered?: boolean } = {},
+): string {
   const lower = text.toLowerCase()
   if (status === 419 || status === 401 || status === 403
     || /authentication[_ ]failed|invalid[_ ]session|session[_ ]expired|scnt[_ ]expired/.test(lower)) {
     return APPLE_ACCOUNT_ERROR_CODES.auth
   }
-  if (status === 429 || /limit|too many|rate.?limit|quota/.test(lower)) {
-    return APPLE_ACCOUNT_ERROR_CODES.limit
+  if (iCloudHmeLimitReason(text)) return APPLE_ACCOUNT_ERROR_CODES.limit
+  if (status === 429 || /\btoo many requests\b|\brate[ -]?limit/.test(lower)) {
+    return metered ? APPLE_ACCOUNT_ERROR_CODES.limit : APPLE_ACCOUNT_ERROR_CODES.throttled
   }
   if (optional && (status === 404 || status === 405 || status === 410 || status === 501)) {
     return APPLE_ACCOUNT_ERROR_CODES.unavailable
@@ -110,20 +131,22 @@ function appleAccountErrorCode(status: number, text: string, optional = false): 
 function appleAccountErrorStatus(code: string): number {
   if (code === APPLE_ACCOUNT_ERROR_CODES.auth) return ICLOUD_CREDENTIAL_ERROR_STATUS
   if (code === APPLE_ACCOUNT_ERROR_CODES.limit) return 429
+  if (code === APPLE_ACCOUNT_ERROR_CODES.throttled) return 503
   return 502
 }
 
-function appleAccountErrorMessage(code: string, status: number, text: string): string {
-  if (code === APPLE_ACCOUNT_ERROR_CODES.auth) return 'Apple Account 管理态已失效，请重新导入登录态。'
+function appleAccountErrorMessage(code: string): string {
+  if (code === APPLE_ACCOUNT_ERROR_CODES.auth) return 'Apple Account 管理态已失效，请重新登录。'
   if (code === APPLE_ACCOUNT_ERROR_CODES.limit) return 'Apple Account 已达到当前隐私邮箱创建上限，请稍后再试。'
-  return `Apple Account 请求失败（HTTP ${status}）：${appleAccountResponseText(text)}`
+  if (code === APPLE_ACCOUNT_ERROR_CODES.throttled) return 'Apple Account 请求过于频繁，请稍后再试。'
+  return 'Apple Account 请求失败。'
 }
 
 function appleAccountStateUsable(state: AppleAccountState): boolean {
   if (!state.scnt || !state.apiKey) return false
   if (!state.expiresAt) return false
   const expiresAt = Date.parse(state.expiresAt)
-  return Number.isFinite(expiresAt) && expiresAt > Date.now()
+  return Number.isFinite(expiresAt) && expiresAt > Date.now() + APPLE_ACCOUNT_EXPIRY_MARGIN_MS
 }
 
 export interface AppleAccountAlias {
@@ -237,6 +260,8 @@ function aliasFromValue(value: Record<string, unknown>): AppleAccountAlias | nul
  */
 export class AppleAccountClient {
   readonly state: AppleAccountState
+  /** Whether this client has tried a refresh, so a caller retrying an auth failure does not try twice. */
+  refreshAttempted = false
 
   constructor(state: AppleAccountState) {
     this.state = {
@@ -249,6 +274,8 @@ export class AppleAccountClient {
       userAgent: state.userAgent?.trim() || APPLE_ACCOUNT_USER_AGENT,
       host: state.host?.trim() || APPLE_ACCOUNT_HOST,
       origin: state.origin?.trim() || APPLE_ACCOUNT_ORIGIN,
+      // Carried through every rotation: the session is bound to it (assertAppleIdBindable).
+      ...(state.appleId?.trim() ? { appleId: state.appleId.trim().toLowerCase() } : {}),
     }
   }
 
@@ -280,6 +307,7 @@ export class AppleAccountClient {
     const cookie = appleAccountCookieHeader(this.state.cookies)
     if (cookie) headers.set('Cookie', cookie)
     let response: Response
+    let text: string
     try {
       response = await fetch(url.toString(), {
         method,
@@ -288,20 +316,23 @@ export class AppleAccountClient {
         redirect: 'manual',
         signal: AbortSignal.timeout(APPLE_ACCOUNT_REQUEST_TIMEOUT_MS),
       })
+      // The body streams under the same timeout; a stall or reset there is a
+      // transport failure too, not an unexplained exception for the caller.
+      text = await response.text()
     } catch (error) {
       if (error instanceof DOMException && (error.name === 'AbortError' || error.name === 'TimeoutError')) {
         throw new ICloudRemoteError(504, '连接 Apple Account 超时。', false, APPLE_ACCOUNT_ERROR_CODES.api)
       }
       throw new ICloudRemoteError(502, '连接 Apple Account 失败。', false, APPLE_ACCOUNT_ERROR_CODES.api)
     }
-    const text = await response.text()
     if (!response.ok) {
-      const code = appleAccountErrorCode(response.status, text, optional)
+      const code = appleAccountErrorCode(response.status, text, { optional, metered: METERED_PATHS.has(path) })
       throw new ICloudRemoteError(
         appleAccountErrorStatus(code),
-        appleAccountErrorMessage(code, response.status, text),
+        appleAccountErrorMessage(code),
         true,
         code,
+        code === APPLE_ACCOUNT_ERROR_CODES.api ? appleAccountResponseText(response.status, text) : '',
       )
     }
     // Apple only advances these short-lived values on successful responses.
@@ -320,10 +351,11 @@ export class AppleAccountClient {
   }
 
   async refresh(): Promise<AppleAccountState> {
+    this.refreshAttempted = true
     if (!this.state.scnt) {
       throw new ICloudRemoteError(
         ICLOUD_CREDENTIAL_ERROR_STATUS,
-        'Apple Account 管理态缺少 scnt，请重新导入登录态。',
+        'Apple Account 管理态缺少 scnt，请重新登录。',
         true,
         APPLE_ACCOUNT_ERROR_CODES.missing,
       )
@@ -332,9 +364,10 @@ export class AppleAccountClient {
       'GET', '/account/manage/gs/ws/token',
     )
     const timeoutMinutes = Number(token.timeOutInterval)
-    if (Number.isFinite(timeoutMinutes) && timeoutMinutes > 0) {
-      this.state.expiresAt = new Date(Date.now() + timeoutMinutes * 60_000).toISOString()
-    }
+    const lifetimeMs = Number.isFinite(timeoutMinutes) && timeoutMinutes > 0
+      ? timeoutMinutes * 60_000
+      : APPLE_ACCOUNT_DEFAULT_SESSION_MS
+    this.state.expiresAt = new Date(Date.now() + lifetimeMs).toISOString()
     const manage = await this.request<{ apiKey?: string }>(
       'GET', '/account/manage',
     )
@@ -342,7 +375,7 @@ export class AppleAccountClient {
     if (!this.state.apiKey) {
       throw new ICloudRemoteError(
         ICLOUD_CREDENTIAL_ERROR_STATUS,
-        'Apple Account 管理接口未返回 apiKey，请重新导入登录态。',
+        'Apple Account 管理接口未返回 apiKey，请重新登录。',
         true,
         APPLE_ACCOUNT_ERROR_CODES.auth,
       )

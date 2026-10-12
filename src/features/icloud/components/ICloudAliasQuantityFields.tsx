@@ -62,11 +62,13 @@ export function ICloudAliasQuantityFields({ quantity, maximum, baseLabel, disabl
           placeholder={t('留空则由系统自动生成')}
           onChange={(event) => onBaseLabel(event.target.value.slice(0, 60))} />
       </label>
+      {/* Both server create paths fill a blank label in themselves; Apple never
+          sees one, so it never names anything. */}
       <p className="icloud-form-note">{preview
         ? t('将依次命名为 {first} … {last}', {
           first: preview, last: aliasBatchLabel(baseLabel, quantity, quantity),
         })
-        : t('留空标签时由 Apple 自动命名。')}</p>
+        : t('留空时标签为 OmniMail 加创建时间（UTC）。')}</p>
       <ICloudAliasLabelPresets value={baseLabel} disabled={disabled} onPick={onBaseLabel} />
     </>
   )

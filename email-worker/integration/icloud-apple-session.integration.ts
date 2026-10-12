@@ -1,22 +1,27 @@
 import { env } from 'cloudflare:workers'
-import { applyD1Migrations } from 'cloudflare:test'
-import { Hono } from 'hono'
+import { applyD1Migrations, createExecutionContext, waitOnExecutionContext } from 'cloudflare:test'
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
-import type { AppContext } from '../src/app/context'
-import {
-  createICloudAlias,
-  refreshICloudAppleAccount,
-  withAppleAccountSessionGate,
-} from '../src/features/icloud/icloud-account-api'
-import { startAppleAccountLogin } from '../src/features/icloud/icloud-account-auth'
-import { consumeAppleAccountLoginRateLimit } from '../src/features/auth/registration/registration-security'
+import worker from '../src/index'
+import { createSessionToken, storeSession } from '../src/features/auth/session/auth'
+import { createICloudAlias, refreshICloudAppleAccount } from '../src/features/icloud/icloud-account-api'
+import { readICloudAliasQuota } from '../src/features/icloud/icloud-alias-quota'
 import { listICloudAliases } from '../src/features/icloud/icloud-api'
 import { ICLOUD_CREDENTIAL_ERROR_MESSAGE } from '../src/features/icloud/icloud-apple'
+import { withAppleAccountSessionGate } from '../src/features/icloud/icloud-apple-session'
 import { encryptICloudCredential } from '../src/features/icloud/icloud-credentials'
-import { iCloudRoutes } from '../src/features/icloud/icloud-routes'
 import { ICloudAccountStore } from '../src/features/icloud/icloud-store'
-import type { AppleAccountState, ICloudAccount } from '../src/features/icloud/icloud-types'
+import type { ICloudAccount } from '../src/features/icloud/icloud-types'
 import type { SessionUser } from '../src/app/types'
+import {
+  APPLE_TOKEN_PATH,
+  appleRefreshThen,
+  appleTokenResponse,
+  iCloudAccount,
+  liveAppleState,
+  noDefer,
+  pathOf,
+  seedUser,
+} from './icloud-fixtures'
 import { failingDb, racingDb, recordingDb } from './icloud-test-db'
 
 /*
@@ -24,14 +29,12 @@ import { failingDb, racingDb, recordingDb } from './icloud-test-db'
  * Apple rotates scnt on every successful response, so what matters here is
  * which request's copy of the session ends up stored.
  */
+const sessionToken = createSessionToken()
+
 beforeAll(async () => {
   await applyD1Migrations(env.DB, env.TEST_MIGRATIONS)
-  await env.DB.prepare(
-    `INSERT INTO users (
-      id, email, display_name, password_hash, role, mailbox_limit,
-      storage_quota_bytes, can_create_mailboxes, can_reply
-    ) VALUES ('apple-session', 'apple-session@example.com', 'Apple', 'test', 'user', 1, 1024, 1, 0)`,
-  ).run()
+  await seedUser('apple-session')
+  await storeSession(env.DB, 'apple-session', sessionToken)
 })
 
 afterEach(() => vi.restoreAllMocks())
@@ -44,35 +47,18 @@ function store(): ICloudAccountStore {
   return new ICloudAccountStore(env, USER)
 }
 
-/** A session inside its timeout, so no call refreshes it first. */
-function liveState(scnt = 'scnt-live'): AppleAccountState {
-  return {
-    cookies: { session: 'cookie-value' }, scnt, sessionId: 'session-live', apiKey: 'api-live',
-    expiresAt: new Date(Date.now() + 10 * 60_000).toISOString(), lastCheckedAt: '', userAgent: '',
-    host: 'appleid.apple.com', origin: 'https://account.apple.com',
-  }
-}
-
 /** An account managed only through Apple Account: no cookie jar, no IMAP. */
 function appleOnly(id: string, overrides: Partial<ICloudAccount> = {}): ICloudAccount {
-  return {
-    id, userId: USER, name: 'Apple only', realEmail: '', icloudEmail: 'owner@icloud.com',
-    cookies: {}, host: 'icloud.com', appPassword: '', status: 'active',
-    aliasTotal: 0, aliasActive: 0, lastValidated: '', lastError: '',
-    appleAccountState: liveState(), appleAccountStatus: 'active',
-    createdAt: new Date().toISOString(),
+  return iCloudAccount(USER, id, {
+    name: 'Apple only', appPassword: '', appleAccountState: liveAppleState(), appleAccountStatus: 'active',
     ...overrides,
-  } as ICloudAccount
+  })
 }
 
 function list(accountId: string, db = env.DB): Promise<Response> {
   return listICloudAliases({ ...env, DB: db } as typeof env, SESSION, new Request(
     `https://mail.example.com/api/icloud/aliases?accountId=${accountId}`,
-  ))
-}
-
-function pathOf(input: RequestInfo | URL): string {
-  return new URL(input instanceof Request ? input.url : String(input)).pathname
+  ), noDefer)
 }
 
 describe('Apple Account session writes', () => {
@@ -114,9 +100,9 @@ describe('Apple Account session writes', () => {
     // Apple rejected the copy this request held, but a fresh sign-in landed
     // before the failure was written; that one is live and must stay active.
     await store().insert(appleOnly('apple-replaced'))
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('', { status: 401 }))
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response('', { status: 401 }))
     const db = racingDb(env.DB, 'AND apple_account_state_cipher = ?', () => store().saveAppleAccountState(
-      appleOnly('apple-replaced', { appleAccountState: liveState('scnt-signed-in') }),
+      appleOnly('apple-replaced', { appleAccountState: liveAppleState('scnt-signed-in') }),
     ))
 
     expect((await list('apple-replaced', db)).status).toBe(422)
@@ -133,10 +119,10 @@ describe('Apple Account session writes', () => {
     // the winner's write of the session Apple actually rotated.
     await store().insert(appleOnly('apple-loser-first'))
     const winner = await store().get('apple-loser-first')
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('', { status: 401 }))
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response('', { status: 401 }))
 
     expect((await list('apple-loser-first')).status).toBe(422)
-    winner.appleAccountState = liveState('scnt-winner')
+    winner.appleAccountState = liveAppleState('scnt-winner')
     winner.appleAccountStatus = 'active'
 
     await expect(store().advanceAppleAccountState(winner, true)).resolves.toBe(true)
@@ -182,7 +168,10 @@ describe('Apple Account alias listing', () => {
     const response = await list('apple-outage')
 
     expect(response.status).toBe(502)
-    await expect(response.json()).resolves.toMatchObject({ error: expect.stringContaining('HTTP 503') })
+    // Apple's status rides in `detail`, so the message itself stays translatable.
+    await expect(response.json()).resolves.toMatchObject({
+      error: 'Apple Account 请求失败。', detail: expect.stringContaining('HTTP 503'),
+    })
   })
 
   it('lists through a working Apple session when Apple rejects the cookie jar', async () => {
@@ -224,31 +213,32 @@ describe('Apple Account alias listing', () => {
       .resolves.toMatchObject({ appleAccountState: { scnt: 'scnt-rotated' } })
   })
 
-  it('runs a gated listing under waitUntil when it comes through the route', async () => {
+  it('runs a gated listing under waitUntil when it comes through the worker', async () => {
     // Workers drops a request whose client disconnects; only waitUntil lets the
-    // holder persist what Apple rotated and release the gate.
+    // holder persist what Apple rotated and release the gate. Through the real
+    // worker, so auth, scopes and the /api mount sit in between as in production.
     await store().insert(appleOnly('apple-route'))
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(Response.json({ hmeEmails: [] }))
-    const app = new Hono<AppContext>()
-      .use(async (context, next) => { context.set('user', SESSION); await next() })
-      .route('/api', iCloudRoutes)
-    const waited: Promise<unknown>[] = []
-    const context = { waitUntil: (task: Promise<unknown>) => { waited.push(task) }, passThroughOnException: () => undefined }
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(Response.json({ hmeEmails: [] }, { headers: { scnt: 'scnt-route' } }))
+    const context = createExecutionContext()
+    const waitUntil = vi.spyOn(context, 'waitUntil')
 
-    const response = await app.fetch(
-      new Request('https://mail.example.com/api/icloud/aliases?accountId=apple-route'),
-      env, context as unknown as ExecutionContext,
+    const response = await worker.fetch(
+      new Request('https://mail.example.com/api/icloud/aliases?accountId=apple-route', {
+        headers: { Cookie: `omnimail_session=${sessionToken}` },
+      }),
+      env, context,
     )
+    await waitOnExecutionContext(context)
 
     expect(response.status).toBe(200)
-    expect(waited).toHaveLength(1)
-    await Promise.all(waited)
+    expect(waitUntil).toHaveBeenCalled()
+    await expect(store().get('apple-route')).resolves.toMatchObject({ appleAccountState: { scnt: 'scnt-route' } })
   })
 
   it('reports the dead jar when the Apple session is removed before it can stand in', async () => {
     await store().insert(appleOnly('apple-fallback-removed', { cookies: { session: 'dead' } }))
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('', { status: 401 }))
-    const db = racingDb(env.DB, 'cookies_cipher = ?, real_email = ?', () => (
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response('', { status: 401 }))
+    const db = racingDb(env.DB, 'cookies_cipher = ?, status = ?', () => (
       store().clearAppleAccountState('apple-fallback-removed')
     ))
 
@@ -320,7 +310,7 @@ describe('Apple Account create after a disconnect', () => {
     // Apple refused the session after the claim; a refund issued after the
     // task settles never runs for a disconnected request, burning the slot.
     await store().insert(appleOnly('apple-create-refused'))
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('', { status: 401 }))
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response('', { status: 401 }))
 
     const { response, log } = await createKeptAlive('apple-create-refused')
 
@@ -333,7 +323,7 @@ describe('Apple Account create', () => {
   function create(accountId: string, channel?: string, db = env.DB): Promise<Response> {
     return createICloudAlias({ ...env, DB: db } as typeof env, SESSION, new Request('https://mail.example.com/api/icloud/aliases', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ accountId, channel }),
-    }), '192.0.2.1')
+    }), '192.0.2.1', noDefer)
   }
 
   /** Apple accepting every call of a create, without handing out a new scnt. */
@@ -381,25 +371,60 @@ describe('Apple Account create', () => {
       .resolves.toMatchObject({ appleAccountRead: { cipher: before?.cipher } })
   })
 
-  it('marks a session active once Apple accepted its refresh, even if the create then fails', async () => {
-    // An explicit channel reaches rows still marked expired. The refresh
-    // succeeded, so the session is live; the cap hit afterwards says nothing
-    // against it.
+  it('keeps the session its refresh rotated when the create then hits the cap', async () => {
+    // The refresh succeeded, so the session is live and its new scnt has to
+    // land; the cap hit afterwards says nothing against it.
     await store().insert(appleOnly('apple-create-recovered', {
-      appleAccountState: { ...liveState(), expiresAt: '' }, appleAccountStatus: 'expired',
+      appleAccountState: { ...liveAppleState(), expiresAt: '' },
     }))
-    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
-      const path = pathOf(input)
-      if (path === '/account/manage/gs/ws/token') return new Response('{"timeOutInterval":15}', { headers: { scnt: 'scnt-fresh' } })
-      if (path === '/account/manage') return new Response('{"apiKey":"api-fresh"}')
-      return new Response('', { status: 429 })
-    })
+    vi.spyOn(globalThis, 'fetch').mockImplementation(appleRefreshThen(() => new Response('', { status: 429 })))
 
     expect((await create('apple-create-recovered', 'apple_account')).status).toBe(429)
 
     await expect(store().get('apple-create-recovered')).resolves.toMatchObject({
-      appleAccountStatus: 'active', appleAccountState: { scnt: 'scnt-fresh', apiKey: 'api-fresh' },
+      appleAccountStatus: 'active', appleAccountState: { scnt: 'scnt-manage', apiKey: 'api-fresh' },
     })
+  })
+
+  it('closes the Apple window when Apple reports its cap on the create', async () => {
+    // add is metered, so its bare 429 is the hourly cap; settling it as a
+    // refund would keep advertising slots Apple has closed.
+    await store().insert(appleOnly('apple-create-capped'))
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response('', { status: 429 }))
+
+    expect((await create('apple-create-capped', 'apple_account')).status).toBe(429)
+
+    const quota = await readICloudAliasQuota(env.DB, USER, 'apple-create-capped')
+    expect(quota.find((item) => item.channel === 'apple_account')).toMatchObject({ remaining: 0 })
+  })
+
+  it.each(['apple_account', undefined])('refuses at once to create through a session already marked expired (channel %s)', async (channel) => {
+    // By the time a session is marked expired, Apple has refused it even after
+    // a refresh; replaying it once per remaining item of a batch only collects
+    // more refusals. The user is told to sign in again, in the session's own
+    // words, whether or not the request named the channel.
+    const id = `apple-create-expired-${channel ?? 'inferred'}`
+    await store().insert(appleOnly(id, {
+      appleAccountStatus: 'expired', appleAccountError: 'Apple Account 管理态已失效，请重新登录。',
+    }))
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+
+    const response = await create(id, channel)
+
+    expect(response.status).toBe(422)
+    await expect(response.json()).resolves.toEqual({ error: 'Apple Account 管理态已失效，请重新登录。' })
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('marks an expired session active again once a listing gets through', async () => {
+    // Creation no longer retries an expired session; the listing every sync
+    // makes is how one that works after all comes back.
+    await store().insert(appleOnly('apple-list-revived', { appleAccountStatus: 'expired' }))
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => Response.json({ hmeEmails: [] }))
+
+    expect((await list('apple-list-revived')).status).toBe(200)
+
+    await expect(store().get('apple-list-revived')).resolves.toMatchObject({ appleAccountStatus: 'active' })
   })
 
   it('leaves a session that expired while it queued to the cookie jar', async () => {
@@ -418,7 +443,7 @@ describe('Apple Account create', () => {
       const account = await store().get('apple-create-queued')
       account.appleAccountStatus = 'expired'
       await store().saveAppleAccountState(account)
-    })
+    }, noDefer)
 
     const response = await create('apple-create-queued', undefined, recordingDb(env.DB, statements))
     await ahead
@@ -433,17 +458,19 @@ describe('Apple Account manual refresh', () => {
   /** The token call succeeds and rotates scnt; /account/manage answers `status`. */
   function tokenThen(status: number) {
     return async (input: RequestInfo | URL) => (
-      pathOf(input) === '/account/manage/gs/ws/token'
-        ? new Response('{"timeOutInterval":15}', { headers: { scnt: 'scnt-fresh' } })
-        : new Response('', { status })
+      pathOf(input) === APPLE_TOKEN_PATH ? appleTokenResponse() : new Response('', { status })
     )
+  }
+
+  function refresh(accountId: string, db = env.DB): Promise<Response> {
+    return refreshICloudAppleAccount({ ...env, DB: db } as typeof env, SESSION, accountId, noDefer)
   }
 
   it('keeps the scnt the token call rotated when the next step fails', async () => {
     await store().insert(appleOnly('apple-refresh-partial'))
     vi.spyOn(globalThis, 'fetch').mockImplementation(tokenThen(503))
 
-    expect((await refreshICloudAppleAccount(env, SESSION, 'apple-refresh-partial')).status).toBe(502)
+    expect((await refresh('apple-refresh-partial')).status).toBe(502)
 
     await expect(store().get('apple-refresh-partial')).resolves.toMatchObject({
       appleAccountStatus: 'active', appleAccountState: { scnt: 'scnt-fresh' },
@@ -452,16 +479,12 @@ describe('Apple Account manual refresh', () => {
 
   it('does not report a refresh superseded by a removal as refreshed', async () => {
     await store().insert(appleOnly('apple-refresh-removed'))
-    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => (
-      pathOf(input) === '/account/manage/gs/ws/token'
-        ? new Response('{"timeOutInterval":15}', { headers: { scnt: 'scnt-fresh' } })
-        : new Response('{"apiKey":"api-fresh"}')
-    ))
+    vi.spyOn(globalThis, 'fetch').mockImplementation(appleRefreshThen(() => new Response('', { status: 404 })))
     const db = racingDb(env.DB, 'AND apple_account_state_cipher = ?', () => (
       store().clearAppleAccountState('apple-refresh-removed')
     ))
 
-    const response = await refreshICloudAppleAccount({ ...env, DB: db } as typeof env, SESSION, 'apple-refresh-removed')
+    const response = await refresh('apple-refresh-removed', db)
 
     expect(response.status).toBe(400)
   })
@@ -470,70 +493,10 @@ describe('Apple Account manual refresh', () => {
     await store().insert(appleOnly('apple-refresh-rejected'))
     vi.spyOn(globalThis, 'fetch').mockImplementation(tokenThen(401))
 
-    expect((await refreshICloudAppleAccount(env, SESSION, 'apple-refresh-rejected')).status).toBe(422)
+    expect((await refresh('apple-refresh-rejected')).status).toBe(422)
 
     await expect(store().get('apple-refresh-rejected')).resolves.toMatchObject({
       appleAccountStatus: 'expired', appleAccountState: { scnt: 'scnt-fresh' },
     })
-  })
-})
-
-describe('Apple Account sign-in', () => {
-  function signIn(appleId: string): Promise<Response> {
-    return startAppleAccountLogin(env, SESSION, 'apple-login', new Request(
-      'https://mail.example.com/api/icloud/accounts/apple-login/apple-account/login', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ appleId, password: 'not-a-real-password' }),
-      },
-    ))
-  }
-
-  it('stops SRP attempts against one Apple ID before they reach Apple', async () => {
-    // Every SRP round counts toward that Apple ID's lockout and can push a 2FA
-    // prompt to whoever owns it. Warm-up failures never get that far, so they
-    // must not spend the allowance either.
-    await store().insert(appleOnly('apple-login', { appleAccountState: undefined, appleAccountStatus: 'none' }))
-    const warmUpDown = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('', { status: 500 }))
-    for (let attempt = 0; attempt < 6; attempt += 1) {
-      expect((await signIn('person@icloud.com')).status).toBe(502)
-    }
-    warmUpDown.mockRestore()
-    let srpRounds = 0
-    const appleUp = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
-      if (pathOf(input).endsWith('/signin/init')) { srpRounds += 1; return new Response('', { status: 500 }) }
-      return new Response('{}')
-    })
-
-    for (let attempt = 0; attempt < 5; attempt += 1) {
-      expect((await signIn('Person@icloud.com')).status).toBe(502)
-    }
-    const calls = appleUp.mock.calls.length
-    const throttled = await signIn('person@icloud.com')
-
-    expect(throttled.status).toBe(429)
-    expect(Number(throttled.headers.get('Retry-After'))).toBeGreaterThan(0)
-    expect(srpRounds).toBe(5)
-    // Refused up front: not even the warm-up requests go out.
-    expect(appleUp.mock.calls.length).toBe(calls)
-    // The bucket is the Apple ID's, not the account's.
-    expect((await signIn('other@icloud.com')).status).toBe(502)
-  })
-
-  it('keeps one user from locking another out of an Apple ID', async () => {
-    // A bucket shared across users let anyone spend another user's attempts;
-    // attempts the Apple ID bucket refuses must not drain the user's own.
-    for (let attempt = 0; attempt < 5; attempt += 1) {
-      await expect(consumeAppleAccountLoginRateLimit(env.DB, 'user-x', 'victim@icloud.com'))
-        .resolves.toMatchObject({ allowed: true })
-    }
-    for (let attempt = 0; attempt < 5; attempt += 1) {
-      await expect(consumeAppleAccountLoginRateLimit(env.DB, 'user-x', 'victim@icloud.com'))
-        .resolves.toMatchObject({ allowed: false })
-    }
-
-    await expect(consumeAppleAccountLoginRateLimit(env.DB, 'user-v', 'victim@icloud.com'))
-      .resolves.toMatchObject({ allowed: true })
-    await expect(consumeAppleAccountLoginRateLimit(env.DB, 'user-x', 'other@icloud.com'))
-      .resolves.toMatchObject({ allowed: true })
   })
 })

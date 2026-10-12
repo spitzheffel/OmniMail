@@ -125,6 +125,9 @@ export const enExtension: Record<string, string> = {
   '最多添加 {count} 个附件。': 'You can add up to {count} attachments.',
   '回复 {source} 邮件': 'Reply to {source} message',
   '新建 {source} 邮件': 'New {source} message',
+  '新建 OmniMail 邮件': 'New OmniMail message',
+  '刷新 {source} 邮件': 'Refresh {source} mail',
+  '同步 {source} 账号': 'Sync {source} account',
   '移除附件 {filename}': 'Remove attachment {filename}',
   '附件下载失败。': 'Attachment download failed.',
   '附件预览失败。': 'Attachment preview failed.',
@@ -151,8 +154,18 @@ export const enExtension: Record<string, string> = {
     'Reauthorize to use existing aliases and read iCloud mail in Float.',
   '正在读取已连接的 iCloud 账号…': 'Reading connected iCloud accounts…',
   '还没有可用的 iCloud 账号': 'No available iCloud accounts',
-  '请先在网页端连接账号并确认 Cookie 可用，Float 不会读取或保存凭据。':
-    'Connect an account on the web and confirm its cookies work. Float never reads or stores credentials.',
+  '请先在网页端连接 iCloud 账号，Float 不会读取或保存凭据。':
+    'Connect an iCloud account on the web first. Float never reads or stores credentials.',
+  '请先在网页端为账号登录 Apple Account 或配置 Cookie，Float 不会读取或保存凭据。':
+    'Sign in to an Apple Account or add cookies for an account on the web first. Float never reads or stores credentials.',
+  'Apple Account 登录已过期，请在网页端重新登录，Float 不会读取或保存凭据。':
+    'The Apple Account sign-in has expired. Sign in again on the web. Float never reads or stores credentials.',
+  'iCloud Cookie 已失效，请在网页端更新 Cookie 或登录 Apple Account，Float 不会读取或保存凭据。':
+    'The iCloud cookies no longer work. Update them or sign in to an Apple Account on the web. Float never reads or stores credentials.',
+  '前往 iCloud 工作区': 'Open iCloud workspace',
+  '这个账号还不能收信': 'This account cannot receive mail yet',
+  '只登录了 Apple Account 的账号可以创建隐藏邮箱；在网页端配置应用专用密码或 Cookie 后才能在 Float 中收信。':
+    'An account signed in only with an Apple Account can create hidden addresses. Configure an app-specific password or cookies on the web to read its mail in Float.',
   '使用已有隐藏邮箱': 'Use an existing hidden address',
   '选择后可直接复制或填入网页': 'Select one to copy or fill the page',
   '刷新已有 iCloud 隐藏邮箱': 'Refresh existing iCloud hidden addresses',

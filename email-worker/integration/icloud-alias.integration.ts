@@ -14,8 +14,9 @@ import {
 import type { ICloudClient } from '../src/features/icloud/icloud-apple'
 import { encryptICloudCredential } from '../src/features/icloud/icloud-credentials'
 import { ICloudAccountStore, iCloudAliasChannels } from '../src/features/icloud/icloud-store'
-import type { AppleAccountState, ICloudAccount, ICloudAlias } from '../src/features/icloud/icloud-types'
+import type { ICloudAccount, ICloudAlias } from '../src/features/icloud/icloud-types'
 import type { SessionUser } from '../src/app/types'
+import { appleRefreshThen, iCloudAccount, noDefer, pathOf, seedUser, staleAppleState } from './icloud-fixtures'
 import { failingDb, racingDb } from './icloud-test-db'
 
 /*
@@ -25,34 +26,13 @@ import { failingDb, racingDb } from './icloud-test-db'
  */
 beforeAll(async () => {
   await applyD1Migrations(env.DB, env.TEST_MIGRATIONS)
-  await env.DB.prepare(
-    `INSERT INTO users (
-      id, email, display_name, password_hash, role, mailbox_limit,
-      storage_quota_bytes, can_create_mailboxes, can_reply
-    ) VALUES ('icloud-store', 'icloud-store@example.com', 'Store', 'test', 'user', 1, 1024, 1, 0)`,
-  ).run()
+  await seedUser(STORE_USER)
 })
 
 const STORE_USER = 'icloud-store'
 
 function seededAccount(id: string, overrides: Partial<ICloudAccount> = {}): ICloudAccount {
-  return {
-    id,
-    userId: STORE_USER,
-    name: 'Cookieless',
-    realEmail: '',
-    icloudEmail: 'owner@icloud.com',
-    cookies: {},
-    host: 'icloud.com',
-    appPassword: 'app-secret',
-    status: 'active',
-    aliasTotal: 0,
-    aliasActive: 0,
-    lastValidated: '',
-    lastError: '',
-    createdAt: new Date().toISOString(),
-    ...overrides,
-  } as ICloudAccount
+  return iCloudAccount(STORE_USER, id, { name: 'Cookieless', ...overrides })
 }
 
 function storeStore(): ICloudAccountStore {
@@ -297,26 +277,8 @@ function generated(): Response {
   return Response.json({ success: true, result: { hme: 'fresh@icloud.com' } })
 }
 
-/** An Apple management state that is past its timeout but still refreshable. */
-function staleAppleState(): AppleAccountState {
-  return {
-    cookies: { session: 'cookie-value' }, scnt: 'scnt-old', sessionId: 'session-old',
-    apiKey: 'api-old', expiresAt: '', lastCheckedAt: '', userAgent: '',
-    host: 'appleid.apple.com', origin: 'https://account.apple.com',
-  }
-}
-
 /** Answer the two calls refresh() makes, and nothing else. */
-async function appleRefreshOnly(input: RequestInfo | URL): Promise<Response> {
-  const { pathname } = new URL(String(input))
-  if (pathname === '/account/manage/gs/ws/token') {
-    return new Response('{"timeOutInterval":15}', { headers: { scnt: 'scnt-fresh' } })
-  }
-  if (pathname === '/account/manage') {
-    return new Response('{"apiKey":"api-fresh"}', { headers: { scnt: 'scnt-manage' } })
-  }
-  return new Response('', { status: 404 })
-}
+const appleRefreshOnly = appleRefreshThen(() => new Response('', { status: 404 }))
 
 function appleStatus(accountId: string): Promise<{ apple_account_status: string } | null> {
   return env.DB.prepare('SELECT apple_account_status FROM icloud_accounts WHERE id = ?')
@@ -352,24 +314,26 @@ describe('iCloud alias handler failure paths', () => {
     await expect(webUsed('icloud-preview-cap')).resolves.toBe(ICLOUD_ALIAS_HOURLY_LIMITS.icloud_web)
   })
 
-  it('restores the status of a session that refreshed before the claim failed', async () => {
-    // An explicit channel bypasses the availability check, so this runs on a row
-    // still marked expired. refresh() rotates scnt upstream and the catch has to
-    // persist it — writing the rotated state back under the old 'expired' status
-    // would hide a session Apple has just accepted until it is imported again.
+  it('keeps the session a refresh rotated when the claim after it fails', async () => {
+    // refresh() rotates scnt upstream before the claim; dropping that because
+    // D1 failed next would leave a dead scnt stored, and the next call would
+    // mark a session Apple has just accepted expired.
     await storeStore().insert(seededAccount('icloud-refresh-claim', {
-      appleAccountState: staleAppleState(), appleAccountStatus: 'expired',
+      appleAccountState: staleAppleState(), appleAccountStatus: 'active',
     }))
     vi.spyOn(globalThis, 'fetch').mockImplementation(appleRefreshOnly)
     const broken = { ...env, DB: failingDb(env.DB, 'icloud_alias_create_limits') } as typeof env
 
     const response = await createICloudAlias(broken, STORE_SESSION, aliasRequest({
       accountId: 'icloud-refresh-claim', channel: 'apple_account',
-    }), '192.0.2.1')
+    }), '192.0.2.1', noDefer)
 
-    expect(response.status).toBe(502)
+    // D1 failing is the server's own fault, not Apple's.
+    expect(response.status).toBe(500)
     await expect(appleStatus('icloud-refresh-claim'))
       .resolves.toMatchObject({ apple_account_status: 'active' })
+    await expect(storeStore().get('icloud-refresh-claim'))
+      .resolves.toMatchObject({ appleAccountState: { scnt: 'scnt-manage', apiKey: 'api-fresh' } })
   })
 
   it('clears a recorded failure once Apple accepts a preview', async () => {
@@ -425,7 +389,7 @@ describe('iCloud alias handler failure paths', () => {
 
     const response = await listICloudAliases(env, STORE_SESSION, new Request(
       'https://mail.example.com/api/icloud/aliases?accountId=icloud-list-refresh',
-    ))
+    ), noDefer)
 
     expect(response.status).toBe(200)
     await expect(response.json()).resolves.toEqual({ aliases: [] })
@@ -461,10 +425,84 @@ describe('iCloud alias handler failure paths', () => {
       accountId: 'icloud-draft-throttle',
       email: 'candidate@icloud.com',
       previewId: '11111111-2222-4333-8444-555555555555',
-    }), '192.0.2.1')
+    }), '192.0.2.1', noDefer)
 
     expect(response.status).toBe(502)
     await expect(webUsed('icloud-draft-throttle')).resolves.toBe(0)
+  })
+})
+
+describe('iCloud cookie channel create', () => {
+  afterEach(() => vi.restoreAllMocks())
+
+  /**
+   * The legacy Hide My Email service: validate resolves it, generate proposes
+   * an address, reserve spends the hourly slot. `reserve` answers the last.
+   */
+  function hmeService(reserve: () => Response) {
+    return vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const path = pathOf(input)
+      if (path.endsWith('/setup/ws/1/validate')) return serviceResponse()
+      if (path.endsWith('/v1/hme/generate')) return generated()
+      if (path.endsWith('/v1/hme/reserve')) return reserve()
+      if (path.endsWith('/v2/hme/list')) {
+        return Response.json({ success: true, result: { hmeEmails: [{ hme: 'fresh@icloud.com', anonymousId: 'a1', isActive: true }] } })
+      }
+      return new Response('', { status: 404 })
+    })
+  }
+
+  async function createOnJar(accountId: string): Promise<Response> {
+    await storeStore().insert(seededAccount(accountId, { cookies: { session: 'value' } }))
+    return createICloudAlias(env, STORE_SESSION, aliasRequest({ accountId, label: 'Shop', channel: 'icloud_web' }), '192.0.2.1', noDefer)
+  }
+
+  it('answers 201 for a reserve Apple accepted, and counts and audits it', async () => {
+    hmeService(() => Response.json({ success: true, result: { hme: 'fresh@icloud.com' } }))
+
+    const response = await createOnJar('icloud-web-created')
+
+    expect(response.status).toBe(201)
+    await expect(response.json()).resolves.toMatchObject({
+      alias: { email: 'fresh@icloud.com', label: 'Shop' }, channel: 'icloud_web',
+      remaining: ICLOUD_ALIAS_HOURLY_LIMITS.icloud_web - 1,
+    })
+    await expect(webUsed('icloud-web-created')).resolves.toBe(1)
+    const audit = await env.DB.prepare(
+      "SELECT detail_json FROM audit_logs WHERE target_id = ? AND action = 'icloud.alias.create'",
+    ).bind('icloud-web-created').first<{ detail_json: string }>()
+    expect(JSON.parse(audit?.detail_json || '{}')).toMatchObject({ alias: 'fresh@icloud.com', channel: 'icloud_web' })
+  })
+
+  it('saturates the window when Apple caps the reserve itself', async () => {
+    // The reserve is what spends Apple's budget; its bare 429 is the cap, and
+    // the window has to close here instead of each later item rediscovering it.
+    hmeService(throttled)
+
+    const response = await createOnJar('icloud-web-capped')
+
+    expect(response.status).toBe(429)
+    await expect(webUsed('icloud-web-capped')).resolves.toBe(ICLOUD_ALIAS_HOURLY_LIMITS.icloud_web)
+  })
+
+  it('refunds a reserve Apple refused outright', async () => {
+    hmeService(() => Response.json({ success: false, error: { errorMessage: 'This address is not available.' } }))
+
+    const response = await createOnJar('icloud-web-refused')
+
+    expect(response.status).toBe(502)
+    await expect(webUsed('icloud-web-refused')).resolves.toBe(0)
+  })
+
+  it('keeps the slot when the reserve may have committed', async () => {
+    // A 5xx after the request went out says nothing about whether Apple
+    // reserved the address; refunding could over-create.
+    hmeService(() => new Response('', { status: 503 }))
+
+    const response = await createOnJar('icloud-web-unknown')
+
+    expect(response.status).toBe(502)
+    await expect(webUsed('icloud-web-unknown')).resolves.toBe(1)
   })
 })
 
@@ -475,5 +513,11 @@ describe('iCloud alias channel availability', () => {
     expect(iCloudAliasChannels({ ...base, appleAccountStatus: 'expired' }).appleAccount).toBe(false)
     expect(iCloudAliasChannels({ ...base, cookies: {} }).icloudWeb).toBe(false)
     expect(iCloudAliasChannels({ ...base, cookies: { a: 'b' } }).icloudWeb).toBe(true)
+  })
+
+  it('treats a jar Apple rejected as unusable until it works again', () => {
+    const jar = { cookies: { a: 'b' }, appleAccountState: null } as unknown as ICloudAccount
+    expect(iCloudAliasChannels({ ...jar, status: 'error' }).icloudWeb).toBe(false)
+    expect(iCloudAliasChannels({ ...jar, status: 'active' }).icloudWeb).toBe(true)
   })
 })

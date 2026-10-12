@@ -76,6 +76,8 @@ data class ICloudAccount(
     val createdAt: String = "",
     val hasCookies: Boolean = false,
     val hasAppPassword: Boolean = false,
+    val hasAppleAccount: Boolean = false,
+    val appleAccountStatus: String = "none",
 )
 
 @Serializable
@@ -149,8 +151,10 @@ data class ICloudAliasPreviewRequest(val accountId: String)
 data class CreateICloudAliasRequest(
     val accountId: String,
     val label: String,
-    val email: String,
-    val previewId: String,
+    // Only a previewed cookie-channel address sends these. Left out, the Worker
+    // creates through the account's Apple Account session instead.
+    val email: String? = null,
+    val previewId: String? = null,
 )
 
 @Serializable

@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api, type ICloudAccount, type ICloudAliasChannel, type ICloudAliasQuotaChannel } from '../../../shared/api'
 import { errorMessage } from '../../../shared/api/errorMessage'
 import {
   ICLOUD_ALIAS_CHANNEL_ORDER,
   ICLOUD_ALIAS_FALLBACK_LIMITS,
   accountChannelAvailability,
+  quotaRefreshDelay,
 } from '../model/icloud-alias-batch'
 
 /**
@@ -24,7 +25,8 @@ function fallbackChannels(account: ICloudAccount): ICloudAliasQuotaChannel[] {
 }
 
 export function useICloudAliasQuota(account: ICloudAccount) {
-  const [channels, setChannels] = useState<ICloudAliasQuotaChannel[]>(() => fallbackChannels(account))
+  const [loaded, setChannels] = useState<ICloudAliasQuotaChannel[]>(() => fallbackChannels(account))
+  const [unusable, setUnusable] = useState<ICloudAliasChannel[]>([])
   const [loading, setLoading] = useState(true)
   const [estimated, setEstimated] = useState(true)
   const [error, setError] = useState('')
@@ -57,6 +59,22 @@ export function useICloudAliasQuota(account: ICloudAccount) {
     return () => { controller.current?.abort() }
   }, [refresh])
 
+  // A channel whose credentials were rejected mid-run stays out of planning for
+  // the rest of this dialog, whatever the next read says: the quota endpoint
+  // only knows a cookie jar is stored, not that Apple has just refused it.
+  const channels = useMemo(() => loaded.map((quota) => (
+    unusable.includes(quota.channel) ? { ...quota, available: false, remaining: 0 } : quota
+  )), [loaded, unusable])
+
+  // Otherwise a dialog that reached 0 stays locked after the hour rolls over,
+  // until it is closed and opened again.
+  useEffect(() => {
+    const delay = quotaRefreshDelay(channels, Date.now())
+    if (delay === undefined) return undefined
+    const timer = window.setTimeout(() => void refresh(), delay)
+    return () => window.clearTimeout(timer)
+  }, [channels, refresh])
+
   /** Fold a create response's `remaining` in without another round-trip. */
   const applyRemaining = useCallback((channel: ICloudAliasChannel, remaining: number) => {
     setChannels((items) => items.map((item) => (
@@ -66,5 +84,9 @@ export function useICloudAliasQuota(account: ICloudAccount) {
     )))
   }, [])
 
-  return { channels, loading, estimated, error, refresh, applyRemaining }
+  const disable = useCallback((channel: ICloudAliasChannel) => {
+    setUnusable((items) => (items.includes(channel) ? items : [...items, channel]))
+  }, [])
+
+  return { channels, unusable, loading, estimated, error, refresh, applyRemaining, disable }
 }

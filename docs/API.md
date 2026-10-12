@@ -612,8 +612,34 @@ PUT /api/icloud/accounts/{id}/app-password
 DELETE /api/icloud/accounts/{id}
 ```
 
-列表响应只包含账号状态、邮箱、别名数量以及 `hasCookies`、`hasAppPassword`；Cookie、
-应用专用密码和用户归属 ID 永不返回。所有账号查询同时按当前用户 ID 过滤。
+列表响应只包含账号状态、邮箱、别名数量以及 `hasCookies`、`hasAppPassword`、
+`hasAppleAccount`、`appleAccountStatus`；Cookie、应用专用密码、Apple Account 管理态和
+用户归属 ID 永不返回。所有账号查询同时按当前用户 ID 过滤。
+
+Apple Account 管理态登录（创建隐藏邮箱的新接口）：
+
+```http
+POST /api/icloud/accounts/{id}/apple-account/login/start
+{ "appleId": "owner@example.com", "password": "...", "twoFactorMethod": "trusted_device" }
+
+POST /api/icloud/accounts/{id}/apple-account/login/sms
+{ "challengeId": "...", "phoneId": 1 }
+
+POST /api/icloud/accounts/{id}/apple-account/login/2fa
+{ "challengeId": "...", "code": "123456" }
+
+PUT /api/icloud/accounts/{id}/apple-account
+POST /api/icloud/accounts/{id}/apple-account/refresh
+DELETE /api/icloud/accounts/{id}/apple-account
+```
+
+`login/start` 在需要双重认证时返回 `{ needs2FA: true, challengeId, expiresAt, method, phones, phoneId? }`：
+`method` 为 `trusted_device` 或 `phone`，没有受信任设备或推送失败时自动改用短信；`phones`
+是 Apple 返回的已打码手机号，可用 `login/sms` 改用或重发短信。每个挑战 10 分钟内最多 5 次尝试
+（提交验证码与发送短信共用）；挑战过期或次数用完时响应带 `code: "apple_login_challenge_gone"`，
+客户端应重新开始登录。登录按“用户 + Apple ID”每小时 5 次、每用户每小时 10 次限速（429 与
+`Retry-After`）。Apple ID 与账号已绑定的 Apple ID（已有登录态或 Cookie 所属）不一致，或已被同一用户的
+另一个 iCloud 账号使用时返回 409。只用 Apple Account 登录的账号在登录成功后变为 `active`。
 
 隐藏地址与远程收件接口：
 
@@ -622,8 +648,11 @@ GET /api/icloud/aliases?accountId={id}
 POST /api/icloud/aliases/preview
 { "accountId": "..." }
 
+GET /api/icloud/aliases/quota?accountId={id}
+
 POST /api/icloud/aliases
-{ "accountId": "...", "label": "购物网站", "email": "suggested@icloud.com", "previewId": "..." }
+{ "accountId": "...", "label": "购物网站", "channel": "apple_account" }
+{ "accountId": "...", "label": "购物网站", "channel": "icloud_web", "email": "suggested@icloud.com", "previewId": "..." }
 
 PATCH /api/icloud/aliases/{anonymousId}
 { "accountId": "...", "action": "deactivate" }
@@ -634,6 +663,15 @@ DELETE /api/icloud/aliases/{anonymousId}
 GET /api/icloud/inbox?accountId={id}&alias={address}&limit=20&days=7
 GET /api/icloud/inbox/{uid}?accountId={id}
 ```
+
+创建有两条通道：`apple_account`（Apple Account 管理态，直接创建）和 `icloud_web`（网页
+Cookie，需先 `preview` 取得候选地址）。指定 `channel` 时只走该通道；省略时优先 Apple Account，
+仅在 Apple 报告上限时改用 Cookie。每个账号每条通道按整点小时计额（Apple Account 20、Cookie 5），
+`aliases/quota` 返回 `{ channels: [{ channel, available, limit, used, remaining, resetsAt }] }`；
+额度用完返回 429、`Retry-After` 和 `{ error, code: "icloud_alias_hourly_quota", channel, retryAfter }`。
+已失效的 Apple Account 或被 Apple 拒绝的 Cookie 不计为可用通道（`available: false`），创建时直接返回
+422。Cookie 被拒绝而 Apple Account 仍可用时，`GET /api/icloud/aliases` 改经 Apple Account 列出地址，
+并用 `cookieError` 说明 Cookie 需要更新。
 
 收件为按需远程读取，不写入 OmniMail 的 `messages`、R2 或搜索索引。配置应用专用密码
 时优先使用 iCloud IMAP；全部邮件视图可在 IMAP 失败时回退到 iCloud Web 摘要，按隐藏
@@ -822,6 +860,9 @@ npm run docs:api
 | `GET/POST /api/icloud/accounts` | 列出或连接当前用户的 iCloud 账号 |
 | `PATCH /api/icloud/accounts/{id}` | 修改当前用户的 iCloud 账号备注名称 |
 | `PUT /api/icloud/accounts/{id}/{credential}` | 覆盖 Cookie 或应用专用密码 |
+| `POST /api/icloud/accounts/{id}/apple-account/login/{step}` | Apple Account 登录：start、sms、2fa |
+| `PUT/POST/DELETE /api/icloud/accounts/{id}/apple-account` | 导入、刷新（`/refresh`）或移除 Apple Account 管理态 |
+| `GET /api/icloud/aliases/quota` | 查询两条创建通道本小时的额度 |
 | `DELETE /api/icloud/accounts/{id}` | 删除 iCloud 账号及其加密凭据 |
 | `POST /api/icloud/aliases/preview` | 让 Apple 生成可更换的候选隐藏邮箱地址 |
 | `GET/POST /api/icloud/aliases` | 同步或创建 Hide My Email 地址 |

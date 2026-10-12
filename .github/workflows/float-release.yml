@@ -56,8 +56,8 @@ jobs:
             exit 1
           fi
 
-          git fetch origin main:refs/remotes/origin/main
-          git merge-base --is-ancestor "${RELEASE_TAG}^{commit}" origin/main
+          git fetch origin develop:refs/remotes/origin/develop
+          git merge-base --is-ancestor "${RELEASE_TAG}^{commit}" origin/develop
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - run: npm ci

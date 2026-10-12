@@ -209,6 +209,8 @@
     <string name="icloud_create_alias">创建地址</string>
     <string name="icloud_empty_mail">暂无 iCloud 邮件</string>
     <string name="icloud_empty_mail_detail">最近 7 天没有找到邮件，或需要更新账号凭据。</string>
+    <string name="icloud_mail_unavailable">这个账号还不能收信</string>
+    <string name="icloud_mail_unavailable_detail">收信需要应用专用密码或 Cookie，可在账号设置中添加。</string>
     <string name="icloud_select_message">选择一封 iCloud 邮件</string>
     <string name="icloud_select_message_detail">邮件内容会显示在这里。</string>
     <string name="icloud_relay_sender">通过 iCloud 隐藏邮箱转发</string>
@@ -235,6 +237,8 @@
     <string name="icloud_delete_alias_title">永久删除这个地址？</string>
     <string name="icloud_delete_alias_detail">%1$s 将从 Apple 永久删除且无法恢复。</string>
     <string name="icloud_batch_detail">预览并创建最多 5 个地址，每个地址可以设置独立的可选标签。</string>
+    <string name="icloud_batch_detail_apple">通过 Apple Account 创建最多 5 个地址。地址在创建时由 Apple 分配，每个地址可以设置独立的可选标签。</string>
+    <string name="icloud_apple_assigns_address">地址将在创建时由 Apple 分配</string>
     <string name="icloud_batch_progress">正在创建 %1$d/%2$d</string>
     <string name="icloud_alias_number">隐藏邮箱 %1$d</string>
     <string name="icloud_change_candidate">换一个候选地址</string>

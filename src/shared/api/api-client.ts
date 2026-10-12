@@ -63,12 +63,15 @@ export class ApiError extends Error {
    * itself stays a valid t() key. Rendered verbatim after the message.
    */
   readonly detail?: string
+  /** The server's stable name for the case, for a caller that reacts to it rather than just showing it. */
+  readonly code?: string
 
-  constructor(message: string, status: number, quota?: ServiceBackoff, detail?: string) {
+  constructor(message: string, status: number, quota?: ServiceBackoff, detail?: string, code?: string) {
     super(message)
     this.status = status
     this.quota = quota
     this.detail = detail
+    this.code = code
   }
 }
 
@@ -101,7 +104,7 @@ export async function request<T>(path: string, init: RequestOptions = {}): Promi
     }
     throw error
   }
-  const data = await response.json().catch(() => ({})) as { error?: string; detail?: string }
+  const data = await response.json().catch(() => ({})) as { error?: string; detail?: string; code?: string }
   if (!response.ok) {
     const backoff = response.status >= 500 || response.status === 429 ? recordServiceBackoff(data) : undefined
     if (backoff) throw new ApiError(serviceBackoffMessage(backoff), response.status, backoff)
@@ -113,6 +116,7 @@ export async function request<T>(path: string, init: RequestOptions = {}): Promi
       response.status,
       undefined,
       typeof data.detail === 'string' ? data.detail.slice(0, 300) : undefined,
+      typeof data.code === 'string' ? data.code.slice(0, 80) : undefined,
     )
   }
   return data as T

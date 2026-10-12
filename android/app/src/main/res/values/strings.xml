@@ -212,6 +212,8 @@
     <string name="icloud_create_alias">Create addresses</string>
     <string name="icloud_empty_mail">No recent iCloud mail</string>
     <string name="icloud_empty_mail_detail">No messages were found in the last seven days, or the account credentials need updating.</string>
+    <string name="icloud_mail_unavailable">This account cannot receive mail yet</string>
+    <string name="icloud_mail_unavailable_detail">Reading mail needs an app-specific password or a Cookie. Add one in the account settings.</string>
     <string name="icloud_select_message">Select an iCloud message</string>
     <string name="icloud_select_message_detail">The message content will appear here.</string>
     <string name="icloud_relay_sender">Forwarded through iCloud Hide My Email</string>
@@ -238,6 +240,8 @@
     <string name="icloud_delete_alias_title">Permanently delete this address?</string>
     <string name="icloud_delete_alias_detail">%1$s will be deleted from Apple and cannot be recovered.</string>
     <string name="icloud_batch_detail">Preview and create up to five addresses. Each address can have its own optional label.</string>
+    <string name="icloud_batch_detail_apple">Create up to five addresses through your Apple Account. Apple assigns each address when it is created, and each can have its own optional label.</string>
+    <string name="icloud_apple_assigns_address">Apple assigns the address when it is created</string>
     <string name="icloud_batch_progress">Creating %1$d/%2$d</string>
     <string name="icloud_alias_number">Address %1$d</string>
     <string name="icloud_change_candidate">Generate another candidate</string>

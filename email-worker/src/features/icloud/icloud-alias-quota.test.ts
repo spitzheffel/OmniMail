@@ -65,6 +65,12 @@ describe('iCloudAliasQuotaState', () => {
     expect(iCloudAliasQuotaState(rows, NOW, { apple_account: 6 })[0])
       .toMatchObject({ limit: 6, used: 4, remaining: 2 })
   })
+
+  it('reports a window saturated after an upstream cap as used up, not past it', () => {
+    const rows = [{ channel: 'icloud_web', hour_started_at: HOUR_START, hour_count: 1_000_000 }]
+    expect(iCloudAliasQuotaState(rows, NOW)[1])
+      .toMatchObject({ channel: 'icloud_web', limit: 5, used: 5, remaining: 0 })
+  })
 })
 
 describe('claimICloudAliasCreate', () => {
@@ -72,11 +78,15 @@ describe('claimICloudAliasCreate', () => {
     const { db, statements } = database({ row: { hour_count: 3 } })
 
     await expect(claimICloudAliasCreate(db, 'user-1', 'acct-1', 'apple_account', NOW))
-      .resolves.toEqual({ allowed: true, remaining: 17 })
+      .resolves.toEqual({ allowed: true, remaining: 17, hourStartedAt: HOUR_START })
 
     expect(statements).toHaveLength(1)
     expect(statements[0].sql).toContain('ON CONFLICT(account_id, channel) DO UPDATE')
     expect(statements[0].sql).toContain('RETURNING hour_count')
+    // A window only moves forward: a claim from an hour that is already over
+    // must not roll the row back (the real D1 behaviour is in the integration suite).
+    expect(statements[0].sql).toContain('icloud_alias_create_limits.hour_started_at < excluded.hour_started_at')
+    expect(statements[0].sql).not.toContain('!=')
     expect(statements[0].bindings).toEqual([
       'user-1', 'acct-1', 'apple_account', HOUR_START, NOW,
       ICLOUD_ALIAS_HOURLY_LIMITS.apple_account,
@@ -115,26 +125,26 @@ describe('claimICloudAliasCreate', () => {
 })
 
 describe('refund and saturation', () => {
-  it('only gives back a reservation inside the current window', async () => {
+  it('gives a reservation back to the window it was taken from', async () => {
     const { db, statements } = database()
+    // The attempt failed after the hour turned: decrementing the new window
+    // would hand out a slot nobody spent there.
+    const claimedHour = HOUR_START - ICLOUD_ALIAS_HOUR_SECONDS
 
-    await releaseICloudAliasCreate(db, 'user-1', 'acct-1', 'apple_account', NOW)
+    await releaseICloudAliasCreate(db, 'user-1', 'acct-1', 'apple_account', claimedHour, NOW)
 
     expect(statements[0].sql).toContain('hour_count = hour_count - 1')
     expect(statements[0].sql).toContain('hour_count > 0')
-    expect(statements[0].bindings).toEqual([NOW, 'acct-1', 'apple_account', 'user-1', HOUR_START])
+    expect(statements[0].bindings).toEqual([NOW, 'acct-1', 'apple_account', 'user-1', claimedHour])
   })
 
-  it('saturates the window to the channel limit after an upstream cap', async () => {
+  it('saturates the window far past the limit after an upstream cap, never rolling it back', async () => {
     const { db, statements } = database()
 
     await exhaustICloudAliasChannel(db, 'user-1', 'acct-1', 'icloud_web', NOW)
 
-    expect(statements[0].sql).toContain('MAX(icloud_alias_create_limits.hour_count, excluded.hour_count)')
-    expect(statements[0].bindings).toEqual([
-      'user-1', 'acct-1', 'icloud_web', HOUR_START,
-      ICLOUD_ALIAS_HOURLY_LIMITS.icloud_web, NOW,
-    ])
+    expect(statements[0].sql).toContain('WHERE icloud_alias_create_limits.hour_started_at <= excluded.hour_started_at')
+    expect(statements[0].bindings).toEqual(['user-1', 'acct-1', 'icloud_web', HOUR_START, 1_000_000, NOW])
   })
 })
 

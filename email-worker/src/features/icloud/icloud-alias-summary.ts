@@ -47,7 +47,7 @@ export async function refreshICloudAliasSummary(
   }
   // Only updated_at overlaps and nothing reads it, so the counts need not wait
   // for the cookie encryption and its round trip.
-  const writes = [store.saveCookies(account)]
+  const writes: Promise<unknown>[] = [store.saveCookies(account)]
   if (known) writes.push(store.saveAliasSummary(account, known))
   await Promise.all(writes)
 }

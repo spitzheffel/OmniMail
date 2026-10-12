@@ -8,7 +8,7 @@ iCloud 账号、凭据、隐藏地址和按需收件箱。
 
 > iCloud accounts, credentials, aliases, and on-demand inbox access.
 
-本分类共 **19** 个端点。返回 [完整 API 索引](README.md) 或 [API 架构与安全说明](../API.md)。
+本分类共 **20** 个端点。返回 [完整 API 索引](README.md) 或 [API 架构与安全说明](../API.md)。
 
 <!-- endpoint:GET /api/icloud/accounts catalog:82cd25d54b99 -->
 ## `GET /api/icloud/accounts`
@@ -175,7 +175,7 @@ curl --request PUT \
 }'
 ```
 
-<!-- endpoint:PUT /api/icloud/accounts/:id/apple-account catalog:85713db3f720 -->
+<!-- endpoint:PUT /api/icloud/accounts/:id/apple-account catalog:b9295679b959 -->
 ## `PUT /api/icloud/accounts/{id}/apple-account`
 
 **导入 Apple Account 管理态 / Import Apple Account management state**
@@ -187,8 +187,12 @@ curl --request PUT \
 | 项目 | 内容 |
 | --- | --- |
 | 认证 | 登录用户；支持 Session Cookie 或 Access Token |
-| 请求 | Path · id; JSON · state={ cookies, scnt, apiKey, sessionId?, expiresAt? } |
+| 请求 | Path · id; JSON · state={ cookies, scnt, apiKey, sessionId?, expiresAt?, appleId? } |
 | 成功响应 | 200 · { account } |
+
+> 注意：给出 appleId 时会核对归属：与该账号已登录或 Cookie 所属的 Apple ID 不同，或已被你的另一个 iCloud 账号使用，返回 409。
+>
+> Note: With appleId, ownership is checked: an Apple ID other than the one the account already signed in as or its cookies belong to, or one another of your iCloud accounts uses, answers 409.
 
 ### cURL 示例
 
@@ -254,24 +258,28 @@ curl --request DELETE \
   --header "Authorization: Bearer om_at_..."
 ```
 
-<!-- endpoint:POST /api/icloud/accounts/:id/apple-account/login/start catalog:af9308db9228 -->
+<!-- endpoint:POST /api/icloud/accounts/:id/apple-account/login/start catalog:7736a6d31221 -->
 ## `POST /api/icloud/accounts/{id}/apple-account/login/start`
 
 **开始 Apple Account 登录 / Start Apple Account sign-in**
 
-使用 Apple ID 和密码启动管理态登录；密码只用于本次请求。
+使用 Apple ID（邮箱或手机号）和密码启动管理态登录；密码只用于本次请求。需要双重认证时返回验证码去向：受信任设备，或没有受信任设备、推送失败时的短信。
 
-> Start management sign-in with an Apple ID and password; the password is used only for this request.
+> Start management sign-in with an Apple ID (email or phone number) and password; the password is used only for this request. When two-factor authentication is needed, the response says where the code went: trusted devices, or SMS when there are none or the push failed.
 
 | 项目 | 内容 |
 | --- | --- |
 | 认证 | 登录用户；支持 Session Cookie 或 Access Token |
-| 请求 | Path · id; JSON · appleId, password |
-| 成功响应 | 200 · { needs2FA, challengeId?, expiresAt? } |
+| 请求 | Path · id; JSON · appleId, password, twoFactorMethod?=trusted_device\|phone |
+| 成功响应 | 200 · { needs2FA: false, account } \| { needs2FA: true, challengeId, expiresAt, method=trusted_device\|phone, phones: [{ id, number }], phoneId? } |
 
 > 注意：不要向非自有 OmniMail 实例提交 Apple ID 密码。
 >
 > Note: Never submit an Apple ID password to an OmniMail instance you do not control.
+
+> 注意：同一用户每个 Apple ID 每小时 5 次、每个用户每小时 10 次，超出返回 429 和 Retry-After；Apple ID 与账号已绑定的不一致或已被另一个账号使用时返回 409。
+>
+> Note: Each user may try an Apple ID 5 times and sign in 10 times per hour; beyond that the answer is 429 with Retry-After. An Apple ID that differs from the one bound to the account, or that another account uses, answers 409.
 
 ### cURL 示例
 
@@ -286,20 +294,56 @@ curl --request POST \
 }'
 ```
 
-<!-- endpoint:POST /api/icloud/accounts/:id/apple-account/login/2fa catalog:d2fb6fbe8184 -->
+<!-- endpoint:POST /api/icloud/accounts/:id/apple-account/login/sms catalog:acec29566b20 -->
+## `POST /api/icloud/accounts/{id}/apple-account/login/sms`
+
+**改用短信接收验证码 / Get the verification code by SMS**
+
+把等待验证码的登录改为短信接收，或重新发送短信；phoneId 取自开始登录时返回的 phones，省略时用第一个。
+
+> Switch a sign-in waiting for its code to SMS, or send the SMS again; phoneId comes from the phones the start returned, the first one when omitted.
+
+| 项目 | 内容 |
+| --- | --- |
+| 认证 | 登录用户；支持 Session Cookie 或 Access Token |
+| 请求 | Path · id; JSON · challengeId, phoneId? |
+| 成功响应 | 200 · { needs2FA: true, challengeId, expiresAt, method=phone, phones, phoneId } |
+
+> 注意：与提交验证码共用每个挑战 5 次的尝试次数。
+>
+> Note: Shares the 5 attempts each challenge allows with code submissions.
+
+### cURL 示例
+
+```bash
+curl --request POST \
+  --url "https://mail.example.com/api/icloud/accounts/resource_id/apple-account/login/sms" \
+  --header "Authorization: Bearer om_at_..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "challengeId": "challenge_id",
+  "phoneId": 1
+}'
+```
+
+<!-- endpoint:POST /api/icloud/accounts/:id/apple-account/login/2fa catalog:65169f13983b -->
 ## `POST /api/icloud/accounts/{id}/apple-account/login/2fa`
 
 **完成 Apple Account 二次验证 / Complete Apple Account two-factor sign-in**
 
-提交受信任设备的 6 位验证码并保存管理态。
+提交受信任设备或短信收到的 6 位验证码并保存管理态。
 
-> Submit the six-digit trusted-device code and save the management state.
+> Submit the six-digit code from the trusted device or SMS and save the management state.
 
 | 项目 | 内容 |
 | --- | --- |
 | 认证 | 登录用户；支持 Session Cookie 或 Access Token |
 | 请求 | Path · id; JSON · challengeId, code |
 | 成功响应 | 200 · { needs2FA: false, account } |
+
+> 注意：验证码错误返回 422，可重试；挑战过期（410）或 5 次尝试用完（429）时响应带 code=apple_login_challenge_gone，需要重新开始登录。
+>
+> Note: A wrong code answers 422 and may be retried; an expired challenge (410) or one out of its 5 attempts (429) answers with code=apple_login_challenge_gone, and the sign-in has to start over.
 
 ### cURL 示例
 
@@ -314,7 +358,7 @@ curl --request POST \
 }'
 ```
 
-<!-- endpoint:GET /api/icloud/aliases catalog:19a0d38bd83e -->
+<!-- endpoint:GET /api/icloud/aliases catalog:9d0e7f9d736e -->
 ## `GET /api/icloud/aliases`
 
 **同步隐藏邮箱地址 / Sync Hide My Email aliases**
@@ -327,7 +371,11 @@ curl --request POST \
 | --- | --- |
 | 认证 | 登录用户；支持 Session Cookie 或 Access Token |
 | 请求 | Query · accountId |
-| 成功响应 | 200 · { aliases } |
+| 成功响应 | 200 · { aliases, cookieError? } |
+
+> 注意：Cookie 被 Apple 拒绝而 Apple Account 仍可用时，改经 Apple Account 列出地址，并在 cookieError 中说明 Cookie 需要更新。
+>
+> Note: When Apple rejects the cookies but the Apple Account session still works, the list comes through Apple Account and cookieError says the cookies need replacing.
 
 ### cURL 示例
 
@@ -387,7 +435,7 @@ curl --request POST \
 }'
 ```
 
-<!-- endpoint:POST /api/icloud/aliases catalog:26a39612014a -->
+<!-- endpoint:POST /api/icloud/aliases catalog:22d76b1c334a -->
 ## `POST /api/icloud/aliases`
 
 **创建隐藏邮箱地址 / Create a Hide My Email alias**
@@ -401,6 +449,14 @@ curl --request POST \
 | 认证 | 登录用户；支持 Session Cookie 或 Access Token |
 | 请求 | JSON · accountId, label?, channel?=apple_account\|icloud_web, email?, previewId? |
 | 成功响应 | 201 · { alias, channel, remaining } |
+
+> 注意：每个账号每条通道按整点小时计额（Apple Account 20、Cookie 5）；用完返回 429 与 Retry-After，正文为 { error, code=icloud_alias_hourly_quota, channel, retryAfter }。
+>
+> Note: Each channel of each account has an hourly budget (Apple Account 20, cookies 5) that resets on the hour; once spent the answer is 429 with Retry-After and the body { error, code=icloud_alias_hourly_quota, channel, retryAfter }.
+
+> 注意：指定 channel 时只走该通道；省略时优先 Apple Account，仅在其达到 Apple 上限时改用 Cookie。已失效的 Apple Account 直接返回 422，不再请求 Apple。
+>
+> Note: With channel set, only that channel is used; without it Apple Account goes first and cookies take over only when Apple caps it. An expired Apple Account answers 422 without calling Apple.
 
 ### cURL 示例
 

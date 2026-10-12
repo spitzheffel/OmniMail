@@ -76,6 +76,7 @@ describe('device token scopes', () => {
       ['/api/icloud/accounts/account-1/apple-account', 'PUT'],
       ['/api/icloud/accounts/account-1/apple-account/refresh', 'POST'],
       ['/api/icloud/accounts/account-1/apple-account/login/start', 'POST'],
+      ['/api/icloud/accounts/account-1/apple-account/login/sms', 'POST'],
       ['/api/icloud/accounts/account-1/apple-account/login/2fa', 'POST'],
       ['/api/icloud/accounts/account-1/apple-account', 'DELETE'],
       ['/api/icloud/aliases', 'GET'],

@@ -228,6 +228,7 @@ fun ICloudScreen(state: AppUiState, viewModel: AppViewModel, contentPadding: Pad
     if (showAliasSettings && selectedAlias != null) {
         ICloudAliasDialog(
             alias = selectedAlias,
+            canManage = selectedAccount?.managesAlias(selectedAlias) == true,
             working = cloud.isWorking,
             onDismiss = { showAliasSettings = false },
             onToggle = { done ->
@@ -250,6 +251,7 @@ fun ICloudScreen(state: AppUiState, viewModel: AppViewModel, contentPadding: Pad
     if (showCreateAliases) {
         ICloudAliasBatchDialog(
             cloud = cloud,
+            needsPreview = selectedAccount?.needsAliasPreview() != false,
             onDismiss = { showCreateAliases = false },
             onPreview = viewModel::previewICloudAlias,
             onCreate = viewModel::createICloudAliases,
@@ -352,7 +354,15 @@ private fun ICloudMessageList(
     onSelect: (String) -> Unit,
     modifier: Modifier,
 ) {
+    val account = cloud.accounts.firstOrNull { it.id == cloud.selectedAccountId }
     when {
+        // Nothing is fetched for such an account, so explain the empty list
+        // instead of suggesting there was simply no recent mail.
+        cloud.messages.isEmpty() && account?.readsMail() == false -> EmptyPane(
+            title = stringResource(R.string.icloud_mail_unavailable),
+            detail = stringResource(R.string.icloud_mail_unavailable_detail),
+            modifier = modifier,
+        )
         cloud.isLoadingMessages && cloud.messages.isEmpty() -> LoadingPane(
             stringResource(R.string.icloud_loading_messages), modifier,
         )

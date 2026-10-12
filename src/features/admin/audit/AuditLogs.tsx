@@ -26,6 +26,7 @@ import {
 import { getLocale, t } from '../../../shared/i18n'
 import { AdminPageHeader } from '../shell/AdminPageHeader'
 import { AuditLogDetailDialog } from './AuditLogDetailDialog'
+import { iCloudAuditActionLabels, iCloudAuditDetailParts } from './icloudAuditPresentation'
 import { qqAuditActionLabels, qqAuditDetailParts } from './qqAuditPresentation'
 
 const categories: Array<{ id: AuditCategory; label: string }> = [
@@ -54,6 +55,7 @@ const ranges: Array<{ value: AuditDays; label: string }> = [
 
 const actionLabels: Record<string, string> = {
   ...qqAuditActionLabels,
+  ...iCloudAuditActionLabels,
   'setup.complete': '完成系统初始化',
   'auth.login': '网页登录成功',
   'auth.login_failed': '登录失败',
@@ -212,6 +214,7 @@ export function detailText(log: AuditLog): string {
   }
   if (detail.host) parts.push(t('区域：{host}', { host: String(detail.host) }))
   parts.push(...qqAuditDetailParts(log))
+  parts.push(...iCloudAuditDetailParts(log))
   if (log.action === 'system.remote_images.update' && typeof detail.enabled === 'boolean') {
     parts.push(t(detail.enabled ? '默认加载' : '默认阻止'))
   }

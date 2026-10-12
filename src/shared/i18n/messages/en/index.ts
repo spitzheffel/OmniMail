@@ -6,6 +6,7 @@ import { enErrors } from './errors'
 import { enExtension } from './extension'
 import { enGmail } from './gmail'
 import { enICloud } from './icloud'
+import { enICloudApple } from './icloud-apple'
 import { enInvites } from './invites'
 import { enLinuxDoMail } from './linux-do-mail'
 import { enMailFeatures } from './mail-features'
@@ -35,6 +36,7 @@ export const englishTranslations: Record<string, string> = {
   ...enRateLimit,
   ...enVersion,
   ...enICloud,
+  ...enICloudApple,
   ...enLinuxDoMail,
   ...enGmail,
   ...enMicrosoft,

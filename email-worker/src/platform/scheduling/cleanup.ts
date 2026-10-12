@@ -200,6 +200,7 @@ export async function cleanup(env: Env): Promise<void> {
       .bind(now - 24 * 60 * 60),
     env.DB.prepare('DELETE FROM icloud_alias_create_limits WHERE updated_at < ?')
       .bind(now - 24 * 60 * 60),
+    env.DB.prepare('DELETE FROM icloud_auth_challenges WHERE expires_at <= ?').bind(now),
   ])
   try {
     await enqueueMissingMessageSearch(env)

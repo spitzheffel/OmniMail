@@ -5,7 +5,8 @@ export const ICLOUD_APPLE_ACCOUNT_RECOVERY = {
   statements: [
     `ALTER TABLE icloud_accounts ADD COLUMN apple_account_state_cipher TEXT NOT NULL DEFAULT ''`,
     `ALTER TABLE icloud_accounts ADD COLUMN apple_account_expires_at TEXT NOT NULL DEFAULT ''`,
-    `ALTER TABLE icloud_accounts ADD COLUMN apple_account_status TEXT NOT NULL DEFAULT 'none'`,
+    `ALTER TABLE icloud_accounts ADD COLUMN apple_account_status TEXT NOT NULL DEFAULT 'none'
+      CHECK (apple_account_status IN ('none', 'active', 'expired', 'error'))`,
     `ALTER TABLE icloud_accounts ADD COLUMN apple_account_error TEXT NOT NULL DEFAULT ''`,
     `CREATE TABLE IF NOT EXISTS icloud_auth_challenges (
       id TEXT PRIMARY KEY,

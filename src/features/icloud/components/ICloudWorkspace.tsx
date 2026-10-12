@@ -60,6 +60,7 @@ import {
   aliasChannelBlockedMessage,
   hasUsableAliasChannel,
 } from '../model/icloud-alias-batch'
+import { accountListsAliases, accountManagesAliases, accountReadsMail } from '../model/icloud-account-capabilities'
 import { ListScrollTopHeading } from '../../../shared/ui/mail-workspace/ListScrollTopHeading'
 
 function Spinner({ size = 17 }: { size?: number }) {
@@ -96,9 +97,11 @@ export function ICloudWorkspace({ userId, enabled, remoteImagesEnabled }: {
   const [searchQuery, setSearchQuery] = useState('')
   const [loading, setLoading] = useState(true)
   const [syncing, setSyncing] = useState(false)
+  // One slot per source, each cleared only by its own loader: the inbox path
+  // (loadInbox) resets `error` on every alias switch or search, which must not
+  // erase why the account list is stale or the alias list empty.
   const [error, setError] = useState('')
-  // Kept apart from `error`: the inbox path (loadInbox) supersedes sync's inbox
-  // phase and resets `error`, which must not erase why the alias list is empty.
+  const [accountsError, setAccountsError] = useState('')
   const [aliasError, setAliasError] = useState('')
   const [notice, setNotice] = useState('')
   const [addOpen, setAddOpen] = useState(false)
@@ -116,7 +119,7 @@ export function ICloudWorkspace({ userId, enabled, remoteImagesEnabled }: {
   const messageController = useRef<AbortController | null>(null)
   const openDeepLinkMessage = useEffectEvent((message: ICloudMessage) => openMessage(message))
   const selected = accounts.find((account) => account.id === selectedId)
-  const readsMail = Boolean(selected?.hasCookies || selected?.hasAppPassword)
+  const readsMail = accountReadsMail(selected)
   // hasAppleAccount alone would keep this open for a session Apple has already
   // rejected, and the dialog behind it could then only report an exhausted
   // budget for a window nothing ever spent.
@@ -145,10 +148,11 @@ export function ICloudWorkspace({ userId, enabled, remoteImagesEnabled }: {
       const result = await api.iCloudAccounts(controller.signal)
       if (current !== accountsRequestId.current) return
       setAccounts(result.accounts)
+      setAccountsError('')
       setSelectedId((current) => result.accounts.some((item) => item.id === current) ? current : result.accounts[0]?.id || '')
       setCredentials((current) => current ? result.accounts.find((item) => item.id === current.id) || null : null)
     } catch (loadError) {
-      if (current === accountsRequestId.current) setError(errorMessage(loadError))
+      if (current === accountsRequestId.current) setAccountsError(errorMessage(loadError))
     } finally {
       if (current === accountsRequestId.current) setLoading(false)
     }
@@ -171,9 +175,7 @@ export function ICloudWorkspace({ userId, enabled, remoteImagesEnabled }: {
     const inboxCurrent = ++inboxRequestId.current
     setSyncing(true); setError('')
     try {
-      // An expired Apple session is still listed: the server says why it fails,
-      // and a listing Apple accepts marks it active again.
-      if (selected?.hasCookies || selected?.hasAppleAccount) {
+      if (accountListsAliases(selected)) {
         // Aliases and the inbox come from different credentials, so a dead
         // Apple session or cookie jar must not keep a working inbox from loading.
         try {
@@ -213,12 +215,6 @@ export function ICloudWorkspace({ userId, enabled, remoteImagesEnabled }: {
           if (!cached) { setMessages([]); setInboxMethod('') }
           setError(errorMessage(inboxError))
         }
-      }
-    } catch (syncError) {
-      if (aliasCurrent === aliasRequestId.current) {
-        setAliases([])
-        if (!cached) { setMessages([]); setInboxMethod('') }
-        setError(errorMessage(syncError))
       }
     } finally {
       if (aliasCurrent === aliasRequestId.current && inboxCurrent === inboxRequestId.current) setSyncing(false)
@@ -399,15 +395,15 @@ export function ICloudWorkspace({ userId, enabled, remoteImagesEnabled }: {
         {selected && readsMail && (!selectedAlias || selected.hasAppPassword) && <ICloudSearchField
           value={query} loading={syncing} summaryOnly={inboxMethod === 'web'} onChange={setQuery} />}
 
-        {error && <p className="list-error" role="alert"><AlertCircle size={15} />{t(error)}</p>}
-        {aliasError && aliasError !== error && <p className="list-error" role="alert"><AlertCircle size={15} />{t(aliasError)}</p>}
+        {[...new Set([accountsError, aliasError, error].filter(Boolean))].map((message) => (
+          <p className="list-error" role="alert" key={message}><AlertCircle size={15} />{t(message)}</p>
+        ))}
         {activeAlias && <div className="icloud-list-context">
           <span><AtSign size={16} /></span>
           <p><strong>{activeAlias.label || t('未命名地址')}</strong><small>{activeAlias.email}</small></p>
           <div>
             <button type="button" onClick={() => void copyAlias(activeAlias.email)} aria-label={t('复制')} data-tooltip={t('复制')}><Copy size={14} /></button>
-            {/* Deactivate, reactivate and delete exist only on the cookie channel. */}
-            {selected?.hasCookies && <>
+            {accountManagesAliases(selected) && <>
               <button type="button" onClick={() => void aliasAction(activeAlias, activeAlias.active ? 'deactivate' : 'reactivate')} aria-label={t(activeAlias.active ? '停用' : '恢复')} data-tooltip={t(activeAlias.active ? '停用' : '恢复')}>{activeAlias.active ? <PowerOff size={14} /> : <Power size={14} />}</button>
               <button className="is-danger" type="button" onClick={() => void aliasAction(activeAlias, 'delete')} aria-label={t('删除')} data-tooltip={t('删除')}><Trash2 size={14} /></button>
             </>}
@@ -455,8 +451,8 @@ export function ICloudWorkspace({ userId, enabled, remoteImagesEnabled }: {
       {addOpen && <AddICloudAccountDialog onClose={() => setAddOpen(false)} onChanged={loadAccounts} onCreated={(account) => { setAccounts((items) => items.some((item) => item.id === account.id) ? items.map((item) => item.id === account.id ? account : item) : [...items, account]); if (account.hasCookies || account.hasAppPassword || account.hasAppleAccount) setSelectedId(account.id); setNotice(t('iCloud 账号已添加')) }} />}
       {createOpen && selected && <ICloudModal title={t('创建隐藏邮箱')} description={accountChannelAvailability(selected).apple_account
         ? t('Apple Account 会在提交时直接创建地址；本小时剩余额度显示在表单里。')
-        : t('预览 Apple 生成的地址，确认后再创建；本小时剩余额度显示在表单里。')} onClose={() => setCreateOpen(false)}>{(close) => <ICloudAliasBatchForm account={selected} close={close} onCreated={async (createdAliases) => { const latest = createdAliases.at(-1); if (!latest) return; setSelectedAlias(latest.email); setNotice(t(createdAliases.length === 1 ? '新的隐藏邮箱已创建' : '已创建 {count} 个隐藏邮箱', { count: createdAliases.length })); await sync(latest.email, true) }} />}</ICloudModal>}
-      {credentials && <ICloudAccountSettingsDialog account={credentials} onClose={() => setCredentials(null)} onChanged={async () => { clearICloudAccountCache(userId, credentials.id); await loadAccounts() }} onDeleted={async () => { clearICloudAccountCache(userId, credentials.id); await loadAccounts(); setAliases([]); setMessages([]); setInboxMethod('') }} onNotice={setNotice} />}
+        : t('预览 Apple 生成的地址，确认后再创建；本小时剩余额度显示在表单里。')} onClose={() => setCreateOpen(false)}>{(close, closing) => <ICloudAliasBatchForm account={selected} close={close} closing={closing} onCreated={async (createdAliases) => { const latest = createdAliases.at(-1); if (latest) { setSelectedAlias(latest.email); setNotice(t(createdAliases.length === 1 ? '新的隐藏邮箱已创建' : '已创建 {count} 个隐藏邮箱', { count: createdAliases.length })) } await sync(latest?.email, true) }} />}</ICloudModal>}
+      {credentials && <ICloudAccountSettingsDialog account={credentials} onClose={() => setCredentials(null)} onChanged={async () => { clearICloudAccountCache(userId, credentials.id); await loadAccounts() }} onReload={loadAccounts} onDeleted={async () => { clearICloudAccountCache(userId, credentials.id); await loadAccounts(); setAliases([]); setMessages([]); setInboxMethod('') }} onNotice={setNotice} />}
       {notice && <div className="toast" role="status"><Check size={16} />{notice}</div>}
     </div>
   )

@@ -4,6 +4,8 @@ import { t } from '../../../shared/i18n'
 import {
   ICLOUD_ALIAS_CHANNEL_ORDER,
   channelRemaining,
+  isAliasCredentialRejection,
+  isAliasOutcomeUnknown,
   isAliasQuotaRejection,
   type AliasBatchItem,
   type ICloudAliasChannelChoice,
@@ -37,27 +39,37 @@ export type AliasBatchRunOptions = {
 export type AliasBatchRunResult = {
   items: AliasBatchItem[]
   created: CreatedAlias[]
-  remaining: Record<ICloudAliasChannel, number>
+  /**
+   * Only the channels the server reported on. A channel the run never touched
+   * would just echo the submit-time snapshot, which may be the fallback guess.
+   */
+  remaining: Partial<Record<ICloudAliasChannel, number>>
+  /** Channels whose credentials were rejected mid-run. */
+  unusable: ICloudAliasChannel[]
 }
 
 export async function runAliasBatch(options: AliasBatchRunOptions): Promise<AliasBatchRunResult> {
   const { api, accountId, choice, quota, shouldStop, onItems } = options
   const items = options.items.map((item) => ({ ...item }))
   const created: CreatedAlias[] = []
-  const exhausted = new Set<ICloudAliasChannel>()
-  const remaining: Record<ICloudAliasChannel, number> = {
+  const unusable = new Set<ICloudAliasChannel>()
+  // What the run believes is left, starting from the plan's snapshot and then
+  // following every answer. A channel at 0 is spent whether a 429 said so or a
+  // success did: the next item on it could only win a 429 after a preview, a
+  // cookie-jar write and a service lookup.
+  const budget: Record<ICloudAliasChannel, number> = {
     apple_account: channelRemaining(quota, 'apple_account'),
     icloud_web: channelRemaining(quota, 'icloud_web'),
   }
+  const reported: Partial<Record<ICloudAliasChannel, number>> = {}
   const publish = () => onItems?.(items.map((item) => ({ ...item })))
+  const open = (channel: ICloudAliasChannel) => !unusable.has(channel) && budget[channel] > 0
 
   // Only `auto` may move an item; an explicitly chosen channel must surface its
   // own limit instead of quietly spending the other channel's budget.
   function reroute(from: ICloudAliasChannel): ICloudAliasChannel | undefined {
     if (choice !== 'auto') return undefined
-    return ICLOUD_ALIAS_CHANNEL_ORDER.find((channel) => (
-      channel !== from && !exhausted.has(channel) && remaining[channel] > 0
-    ))
+    return ICLOUD_ALIAS_CHANNEL_ORDER.find((channel) => channel !== from && open(channel))
   }
 
   for (let index = 0; index < items.length; index += 1) {
@@ -68,10 +80,15 @@ export async function runAliasBatch(options: AliasBatchRunOptions): Promise<Alia
       publish()
       break
     }
-    if (exhausted.has(items[index].channel)) {
-      const alternative = reroute(items[index].channel)
+    const planned = items[index].channel
+    if (!open(planned)) {
+      const alternative = reroute(planned)
       if (!alternative) {
-        items[index] = { ...items[index], status: 'skipped', error: t('本小时创建额度已用完') }
+        items[index] = {
+          ...items[index],
+          status: 'skipped',
+          error: unusable.has(planned) ? t('这个通道的登录态已失效，未再尝试。') : t('本小时创建额度已用完'),
+        }
         publish()
         continue
       }
@@ -80,15 +97,21 @@ export async function runAliasBatch(options: AliasBatchRunOptions): Promise<Alia
     const item = items[index]
     items[index] = { ...item, status: 'running', error: '' }
     publish()
+    let { email, previewId } = item
+    let sent = false
     try {
-      let { email, previewId } = item
       // The cookie channel reserves a concrete address first. Doing it here
       // rather than upfront keeps the preview fresh when its turn comes.
       if (item.channel === 'icloud_web' && !email) {
         const preview = await api.previewICloudAlias(accountId)
         email = preview.email
         previewId = preview.previewId
+        // Held on the item so a create that never answers still knows which
+        // address it asked for.
+        items[index] = { ...items[index], email, previewId }
+        publish()
       }
+      sent = true
       const result = await api.createICloudAlias({
         accountId,
         label: item.label,
@@ -97,7 +120,8 @@ export async function runAliasBatch(options: AliasBatchRunOptions): Promise<Alia
         previewId: item.channel === 'icloud_web' ? previewId : undefined,
       })
       created.push(result.alias)
-      remaining[result.channel] = result.remaining
+      budget[result.channel] = result.remaining
+      reported[result.channel] = result.remaining
       items[index] = {
         ...item,
         channel: result.channel,
@@ -109,12 +133,12 @@ export async function runAliasBatch(options: AliasBatchRunOptions): Promise<Alia
       publish()
     } catch (error) {
       if (isAliasQuotaRejection(error)) {
-        exhausted.add(item.channel)
-        remaining[item.channel] = 0
+        budget[item.channel] = 0
+        reported[item.channel] = 0
         const alternative = reroute(item.channel)
         if (alternative) {
-          // Retry this same item on the other channel; `exhausted` guarantees
-          // the loop cannot bounce it back.
+          // Retry this same item on the other channel; the spent budget
+          // guarantees the loop cannot bounce it back.
           items[index] = { ...item, channel: alternative, status: 'pending', error: '' }
           index -= 1
           continue
@@ -123,9 +147,17 @@ export async function runAliasBatch(options: AliasBatchRunOptions): Promise<Alia
         publish()
         continue
       }
-      items[index] = { ...item, status: 'error', error: errorMessage(error) }
+      // Not rerouted like a 429: this item has to show why the channel died,
+      // or a dead session hides behind successes on the other channel.
+      if (isAliasCredentialRejection(error)) unusable.add(item.channel)
+      items[index] = sent && isAliasOutcomeUnknown(error)
+        ? {
+          ...item, email, previewId, status: 'unknown',
+          error: t('请求超时，结果未知：Apple 可能已经创建了这个地址，请以同步后的列表为准。'),
+        }
+        : { ...item, email, previewId, status: 'error', error: errorMessage(error) }
       publish()
     }
   }
-  return { items, created, remaining }
+  return { items, created, remaining: reported, unusable: [...unusable] }
 }

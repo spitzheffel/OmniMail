@@ -40,6 +40,13 @@ export const APPLE_ACCOUNT_ERROR_CODES = {
    */
   unavailable: 'apple_account_api_unavailable',
   missing: 'apple_account_session_missing',
+  /**
+   * Apple turned a call down for coming too often, on an endpoint that does not
+   * spend the hourly budget (the token, the management page, the listing).
+   * Distinct from `limit` so it neither saturates the create window nor reads
+   * as the cap to the client.
+   */
+  throttled: 'apple_account_throttled',
   // Raised by our own local cooldown, never by Apple. It must stay distinct
   // from `limit` so the create handler cannot mistake its own rejection for a
   // fresh upstream limit and extend the cooldown again.
@@ -58,15 +65,18 @@ export const ICLOUD_WEB_ERROR_CODES = {
 } as const
 
 /**
- * The legacy Hide My Email endpoints answer 200 with `success: false` and phrase
- * the hourly cap in prose, so the wording is the only signal. Matchers ported
- * from the reference panel's isICloudHMELimitMessage.
+ * The Hide My Email endpoints phrase the hourly cap in prose, so the wording is
+ * the only signal. Matchers ported from the reference panel's
+ * isICloudHMELimitMessage, plus the zh-CN phrasing the Apple Account endpoints
+ * answer in. `limit` must be a whole word: "unlimited" or "delimiter" in some
+ * unrelated message is not the cap.
  */
-function iCloudHmeLimitReason(reason: string): boolean {
+export function iCloudHmeLimitReason(reason: string): boolean {
   const text = reason.toLowerCase()
   return text.includes('reached the limit of addresses')
-    || (text.includes('limit') && text.includes('try again later'))
+    || (/\blimit\b/.test(text) && text.includes('try again later'))
     || reason.includes('创建上限')
+    || (reason.includes('上限') && reason.includes('稍后'))
 }
 
 /**
@@ -190,6 +200,17 @@ function nestedObjectArray(value: unknown): Record<string, unknown>[] | undefine
     if (found) return found
   }
   return undefined
+}
+
+/**
+ * Whether a list response names its aliases where they can be read. An empty
+ * account still answers with `hmeEmails: []`; a payload with no list at all is
+ * a shape we do not understand, and reading it as "no aliases" would persist a
+ * count of zero for an account that has some.
+ */
+export function iCloudAliasListRecognized(value: unknown): boolean {
+  const root = value as { result?: { hmeEmails?: unknown } } | null
+  return Array.isArray(root?.result?.hmeEmails) || Boolean(nestedObjectArray(value))
 }
 
 export function parseICloudAliases(value: unknown): ICloudAlias[] {
@@ -397,6 +418,9 @@ export class ICloudClient {
     // the account's real count.
     if (data?.success === false) {
       throw new ICloudRemoteError(502, 'iCloud 无法读取隐藏邮箱列表。', true, '', iCloudHmeReason(data))
+    }
+    if (!iCloudAliasListRecognized(data)) {
+      throw new ICloudRemoteError(502, 'iCloud 未返回可识别的隐藏邮箱列表。', true)
     }
     return parseICloudAliases(data)
   }

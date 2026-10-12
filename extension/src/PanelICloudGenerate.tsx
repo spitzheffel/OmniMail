@@ -12,6 +12,7 @@ import {
 import { useState, type FormEvent, type ReactNode } from 'react'
 import { t, useLocale } from '../../src/shared/i18n'
 import type { ICloudAccount, ICloudAlias } from '../../src/shared/api/api-types'
+import { iCloudAccountLabel, type ICloudAliasUnavailableReason } from './icloud-accounts'
 import { PanelSelect } from './PanelSelect'
 
 interface Props {
@@ -25,6 +26,7 @@ interface Props {
   loadingAccounts: boolean
   loadingAliases: boolean
   selectedAlias: string
+  unavailableReason: ICloudAliasUnavailableReason | null
   onAccount: (accountId: string) => void
   onAlias: (email: string) => void
   onCopy: (address: string) => void
@@ -55,6 +57,20 @@ function StateCard({ icon, title, description, action, onAction, busy = false }:
       </button>
     </div>
   )
+}
+
+/** Name what blocks alias creation; cookies are only one of two ways to unblock it. */
+function unavailableDescription(reason: ICloudAliasUnavailableReason | null): string {
+  switch (reason) {
+    case 'apple-expired':
+      return t('Apple Account 登录已过期，请在网页端重新登录，Float 不会读取或保存凭据。')
+    case 'cookie-expired':
+      return t('iCloud Cookie 已失效，请在网页端更新 Cookie 或登录 Apple Account，Float 不会读取或保存凭据。')
+    case 'no-alias-login':
+      return t('请先在网页端为账号登录 Apple Account 或配置 Cookie，Float 不会读取或保存凭据。')
+    default:
+      return t('请先在网页端连接 iCloud 账号，Float 不会读取或保存凭据。')
+  }
 }
 
 function AliasSkeleton() {
@@ -89,7 +105,7 @@ export function PanelICloudGenerate(props: Props) {
   }
   if (!props.accounts.length) {
     return <StateCard icon={<Cloud size={21} />} title={t('还没有可用的 iCloud 账号')}
-      description={t('请先在网页端连接账号并确认 Cookie 可用，Float 不会读取或保存凭据。')}
+      description={unavailableDescription(props.unavailableReason)}
       action={t('前往 iCloud 工作区')} onAction={props.onOpenWeb} />
   }
 
@@ -108,7 +124,7 @@ export function PanelICloudGenerate(props: Props) {
           <label htmlFor="icloud-account">{t('iCloud 账号')}</label>
           <PanelSelect id="icloud-account" ariaLabel={t('iCloud 账号')} value={props.accountId}
             options={props.accounts.map((account) => ({
-              label: `${account.name} · ${account.realEmail || account.icloudEmail || account.host}`,
+              label: iCloudAccountLabel(account),
               value: account.id,
             }))}
             disabled={props.busy} onChange={props.onAccount} />

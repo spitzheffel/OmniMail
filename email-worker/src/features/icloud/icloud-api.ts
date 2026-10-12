@@ -7,13 +7,9 @@ import {
 } from './icloud-apple'
 import { exhaustICloudAliasChannel } from './icloud-alias-quota'
 import { refreshICloudAliasSummary } from './icloud-alias-summary'
-import {
-  deleteICloudAppleAccount,
-  listAppleAccountAliases,
-  refreshICloudAppleAccount,
-  updateICloudAppleAccount,
-  type KeepAlive,
-} from './icloud-account-api'
+import { listAppleAccountAliases } from './icloud-account-api'
+import type { Defer } from './icloud-apple-session'
+import { iCloudErrorResponse, jsonBody, stringField } from './icloud-http'
 import {
   ICloudAccountStore,
   ICloudStoreError,
@@ -32,30 +28,7 @@ export {
   updateICloudAppleAccount,
 } from './icloud-account-api'
 function responseError(error: unknown): Response {
-  if (error instanceof ICloudRemoteError) {
-    // `detail` stays out of `error` so the client can still translate it.
-    return Response.json(
-      error.detail ? { error: error.message, detail: error.detail } : { error: error.message },
-      { status: error.status },
-    )
-  }
-  if (error instanceof ICloudStoreError) {
-    return Response.json({ error: error.message }, { status: error.status })
-  }
-  console.error('iCloud request failed', error)
-  return Response.json({ error: 'iCloud 暂时无法处理这个请求。' }, { status: 500 })
-}
-async function jsonBody(request: Request): Promise<Record<string, unknown>> {
-  try {
-    const body = await request.json<unknown>()
-    if (!body || Array.isArray(body) || typeof body !== 'object') throw new Error()
-    return body as Record<string, unknown>
-  } catch {
-    throw new ICloudStoreError(400, '请求体必须是 JSON 对象。')
-  }
-}
-function stringField(value: unknown): string {
-  return typeof value === 'string' ? value.trim() : ''
+  return iCloudErrorResponse(error, 'iCloud request failed')
 }
 function validICloudEmail(value: string): boolean {
   return ['icloud.com', 'me.com', 'mac.com'].includes(value.toLowerCase().split('@')[1] || '')
@@ -115,6 +88,22 @@ async function aliasForAudit(
     })
     return undefined
   }
+}
+
+/**
+ * A jar validates as the Apple ID it belongs to, which the account must be
+ * free to take: not one its Apple Account session signed in as differently,
+ * and not one another account of the user already creates aliases as (see
+ * assertAppleIdBindable for why both matter).
+ */
+async function assertJarBindable(store: ICloudAccountStore, account: ICloudAccount): Promise<void> {
+  const jarAppleId = account.realEmail.trim().toLowerCase()
+  const signedIn = account.appleAccountState?.appleId?.trim().toLowerCase() || ''
+  if (signedIn.includes('@') && jarAppleId.includes('@') && signedIn !== jarAppleId) {
+    throw new ICloudStoreError(409, '这些 Cookie 属于另一个 Apple ID，与这个账号的 Apple Account 登录不一致：', jarAppleId)
+  }
+  const owner = await store.appleIdOwner(jarAppleId, account.id)
+  if (owner) throw new ICloudStoreError(409, '这个 Apple ID 已在另一个 iCloud 账号中使用：', owner)
 }
 
 async function validateAccount(account: ICloudAccount): Promise<unknown> {
@@ -196,6 +185,7 @@ export async function createICloudAccount(
     if (hasCookies) {
       const validationError = await validateAccount(account)
       if (validationError) throw validationError
+      await assertJarBindable(store, account)
     }
     if (hasAppPassword) await validateAppPassword(icloudEmail, appPassword)
     if (!hasCookies && !hasAppPassword && wantsAppleAccountLogin) {
@@ -273,7 +263,8 @@ export async function updateICloudCookies(
     const known = iCloudAliasCounts(account)
     account.cookies = parseICloudCookies(body.cookies)
     const validationError = await validateAccount(account)
-    const writes = [store.saveCookies(account)]
+    if (!validationError) await assertJarBindable(store, account)
+    const writes = [store.replaceCookies(account)]
     if (!validationError) writes.push(store.saveAliasSummary(account, known))
     await Promise.all(writes)
     await writeAudit(env, user.id, 'icloud.credentials.cookies', id, ip, iCloudAuditDetail(account))
@@ -314,7 +305,7 @@ export async function listICloudAliases(
   env: Env,
   user: SessionUser,
   request: Request,
-  keepAlive?: KeepAlive,
+  defer: Defer,
 ): Promise<Response> {
   try {
     const accountId = new URL(request.url).searchParams.get('accountId') || ''
@@ -323,7 +314,7 @@ export async function listICloudAliases(
     const account = await store.get(accountId)
     const known = iCloudAliasCounts(account)
     if (!Object.keys(account.cookies).length && account.appleAccountState) {
-      return await listAppleAccountAliases(store, account, { keepAlive })
+      return await listAppleAccountAliases(store, account, { defer })
     }
     if (!Object.keys(account.cookies).length) {
       throw new ICloudStoreError(400, '该账号尚未配置 Cookie。')
@@ -351,7 +342,7 @@ export async function listICloudAliases(
       // A jar Apple rejected says nothing about the Apple Account session, which
       // creation already prefers; list through it instead of failing the view.
       if (rejected && iCloudAliasChannels(account).appleAccount) {
-        return await listAppleAccountAliases(store, account, { cookieError: error, keepAlive })
+        return await listAppleAccountAliases(store, account, { cookieError: error, defer })
       }
       throw error
     }

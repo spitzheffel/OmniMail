@@ -1,36 +1,56 @@
+import { writeAudit } from '../../shared/audit/audit'
 import {
   checkAppleAccountLoginRateLimit,
   consumeAppleAccountLoginRateLimit,
 } from '../auth/registration/registration-security'
-import { decryptICloudSecret, encryptICloudSecret } from './icloud-credentials'
-import { ICloudAccountStore, ICloudStoreError, publicICloudAccount } from './icloud-store'
-import { AppleAccountClient } from './icloud-account-client'
+import { APPLE_ACCOUNT_ERROR_CODES, ICloudRemoteError } from './icloud-apple'
 import {
-  APPLE_ACCOUNT_ERROR_CODES,
-  ICloudRemoteError,
-} from './icloud-apple'
-import type { AppleAccountState } from './icloud-types'
+  APPLE_ACCOUNT_ORIGIN,
+  APPLE_ACCOUNT_USER_AGENT,
+  AppleAccountClient,
+  appleAccountCookieHeader,
+} from './icloud-account-client'
+import { srpBase64, srpProof, srpPublic, srpSecret } from './icloud-apple-srp'
+import {
+  ACTIVE_APPLE_SESSION,
+  assertAppleIdBindable,
+  authFailure,
+  outlive,
+  promoteAppleOnly,
+  type Defer,
+} from './icloud-apple-session'
+import {
+  APPLE_LOGIN_CHALLENGE_GONE,
+  AppleLoginChallenges,
+  CHALLENGE_MAX_ATTEMPTS,
+  appleLoginChallengeGone,
+  type ClaimedChallenge,
+  type PendingAppleSignIn,
+  type TrustedPhone,
+  type TwoFactorMethod,
+} from './icloud-auth-challenges'
+import { iCloudErrorResponse, jsonBody } from './icloud-http'
+import { ICloudAccountStore, ICloudStoreError, publicICloudAccount } from './icloud-store'
+import type { AppleAccountState, ICloudAccount } from './icloud-types'
 import type { Env, SessionUser } from '../../app/types'
 
 const APPLE_AUTH_BASE = 'https://idmsa.apple.com/appleauth/auth'
-const APPLE_ACCOUNT_ORIGIN = 'https://account.apple.com'
 const APPLE_ACCOUNT_CLIENT_ID = 'af1139274f266b22b68c2a3e7ad932cb3c0bbe854e13a79af78dcc73136882c3'
-const APPLE_ACCOUNT_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
-  + 'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36'
 const AUTH_TIMEOUT_MS = 30_000
-const CHALLENGE_TTL_SECONDS = 10 * 60
-const CHALLENGE_MAX_ATTEMPTS = 5
+/**
+ * The Apple calls of one step, the start or a code, together. The web client
+ * gives up after 120s; a start still talking to Apple past that would push a
+ * code nobody is left to enter, so the step gives up first.
+ */
+const SIGN_IN_BUDGET_MS = 90_000
 
-type PendingAuthState = {
-  appleId: string
-  frameId: string
-  cookies: Record<string, string>
-  scnt: string
-  sessionId: string
-  authAttributes: string
-  hcBits: number
-  hcChallenge: string
-  twoFactorMethod: 'trusted_device' | 'phone'
+/** What a sign-in step works with besides the pending Apple session. */
+interface SignInContext {
+  env: Env
+  user: SessionUser
+  store: ICloudAccountStore
+  account: ICloudAccount
+  ip: string
 }
 
 function safeString(value: unknown, max = 4096): string {
@@ -39,11 +59,7 @@ function safeString(value: unknown, max = 4096): string {
   return text
 }
 
-function cookieHeader(cookies: Record<string, string>): string {
-  return Object.entries(cookies).filter(([, value]) => value)
-    .map(([name, value]) => `${name}=${value}`).join('; ')
-}
-
+/** Cookie values are kept exactly as Apple set them, quotes included, since that is how a browser returns them. */
 function mergeCookies(cookies: Record<string, string>, headers: Headers): void {
   const extended = headers as Headers & { getSetCookie?: () => string[] }
   const values = extended.getSetCookie?.() || []
@@ -62,14 +78,14 @@ function frameTag(frameId: string): string {
   return `auth-${frameId}`
 }
 
-function authHeaders(session: PendingAuthState, includeAppleAccount = true): Headers {
+function authHeaders(session: PendingAppleSignIn): Headers {
   const frame = frameTag(session.frameId)
   const headers = new Headers({
     Accept: 'application/json, text/javascript, */*; q=0.01',
     'Content-Type': 'application/json',
     Origin: APPLE_ACCOUNT_ORIGIN,
     Referer: `${APPLE_ACCOUNT_ORIGIN}/`,
-    'User-Agent': APPLE_ACCOUNT_UA,
+    'User-Agent': APPLE_ACCOUNT_USER_AGENT,
     'X-Apple-Widget-Key': APPLE_ACCOUNT_CLIENT_ID,
     'X-Apple-OAuth-Client-Id': APPLE_ACCOUNT_CLIENT_ID,
     'X-Apple-OAuth-Client-Type': 'firstPartyAuth',
@@ -80,23 +96,22 @@ function authHeaders(session: PendingAuthState, includeAppleAccount = true): Hea
     'X-Apple-Frame-Id': frame,
     'X-Apple-I-Request-Context': 'ca',
     'X-Apple-I-TimeZone': 'Asia/Shanghai',
-    'X-Apple-I-FD-Client-Info': JSON.stringify({ U: APPLE_ACCOUNT_UA, L: 'zh', Z: 'GMT+08:00', V: '1.1', F: '' }),
+    'X-Apple-I-FD-Client-Info': JSON.stringify({ U: APPLE_ACCOUNT_USER_AGENT, L: 'zh', Z: 'GMT+08:00', V: '1.1', F: '' }),
     'X-Apple-App-Id': APPLE_ACCOUNT_CLIENT_ID,
+    'X-Apple-Domain-Id': '11',
+    'X-Apple-Privacy-Consent': 'true',
+    'X-Apple-Privacy-Consent-Accepted': 'true',
   })
-  if (includeAppleAccount) {
-    headers.set('X-Apple-Domain-Id', '11')
-    headers.set('X-Apple-Privacy-Consent', 'true')
-    headers.set('X-Apple-Privacy-Consent-Accepted', 'true')
-  }
   if (session.scnt) headers.set('scnt', session.scnt)
   if (session.sessionId) headers.set('X-Apple-ID-Session-Id', session.sessionId)
   if (session.authAttributes) headers.set('X-Apple-Auth-Attributes', session.authAttributes)
-  const cookie = cookieHeader(session.cookies)
+  const cookie = appleAccountCookieHeader(session.cookies)
   if (cookie) headers.set('Cookie', cookie)
   return headers
 }
 
-function captureHeaders(session: PendingAuthState, headers: Headers): void {
+/** Unlike the management API, the sign-in rotates its values on refusals too, and the next call must present them. */
+function captureHeaders(session: PendingAppleSignIn, headers: Headers): void {
   mergeCookies(session.cookies, headers)
   const scnt = headers.get('scnt')?.trim()
   const sessionId = headers.get('X-Apple-ID-Session-Id')?.trim()
@@ -110,175 +125,121 @@ function captureHeaders(session: PendingAuthState, headers: Headers): void {
   if (challenge) session.hcChallenge = challenge
 }
 
+function parseJson(text: string): Record<string, unknown> {
+  try {
+    const value = JSON.parse(text) as unknown
+    return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
+  } catch { return {} }
+}
+
+/** Apple's own explanation of a refusal, for `detail`. */
+function appleReason(status: number, text: string): string {
+  const data = parseJson(text)
+  const errors = [data.serviceErrors, data.service_errors].find(Array.isArray) as unknown[] | undefined
+  const message = (errors || [])
+    .map((entry) => safeString((entry as Record<string, unknown> | null)?.message, 300))
+    .find(Boolean)
+  return message ? `HTTP ${status}: ${message}` : `HTTP ${status}`
+}
+
+function appleTimeout(): ICloudRemoteError {
+  return new ICloudRemoteError(504, '连接 Apple Account 超时。', false, APPLE_ACCOUNT_ERROR_CODES.api)
+}
+
+/**
+ * One call to Apple inside the step's budget. Reading the body stays inside
+ * the try: a stall or reset there is a transport failure too.
+ */
+async function appleFetch(
+  url: string,
+  init: RequestInit,
+  deadline: number,
+): Promise<{ response: Response; text: string }> {
+  const left = deadline - Date.now()
+  if (left <= 0) throw appleTimeout()
+  try {
+    const response = await fetch(url, { ...init, signal: AbortSignal.timeout(Math.min(AUTH_TIMEOUT_MS, left)) })
+    return { response, text: await response.text() }
+  } catch (error) {
+    if (error instanceof DOMException && (error.name === 'AbortError' || error.name === 'TimeoutError')) {
+      throw appleTimeout()
+    }
+    throw new ICloudRemoteError(502, '连接 Apple Account 失败。', false, APPLE_ACCOUNT_ERROR_CODES.api)
+  }
+}
+
+/** `codeCheck` marks the calls that submit a verification code, where a 400 means the code was wrong. */
+function signInError(status: number, text: string, codeCheck: boolean): ICloudRemoteError {
+  if (codeCheck && (status === 400 || text.includes('-21669'))) {
+    return new ICloudRemoteError(422, '验证码不正确，请重新输入。', true, APPLE_ACCOUNT_ERROR_CODES.auth)
+  }
+  const reason = appleReason(status, text)
+  if (status === 401 || status === 403 || status === 419 || /authentication_failed/i.test(text)) {
+    return new ICloudRemoteError(422, 'Apple 登录已失效，请重新登录。', true, APPLE_ACCOUNT_ERROR_CODES.auth, reason)
+  }
+  if (status === 429 || status === 503) {
+    return new ICloudRemoteError(503, 'Apple 登录请求过于频繁，请稍后再试。', true, APPLE_ACCOUNT_ERROR_CODES.throttled, reason)
+  }
+  return new ICloudRemoteError(502, 'Apple 登录请求失败。', true, APPLE_ACCOUNT_ERROR_CODES.api, reason)
+}
+
 async function appleRequest(
-  session: PendingAuthState,
+  session: PendingAppleSignIn,
   method: string,
   path: string,
-  body?: unknown,
-  allowConflict = false,
-): Promise<{ status: number; text: string }> {
-  const headers = authHeaders(session)
-  const response = await fetch(`${APPLE_AUTH_BASE}${path}`, {
+  body: unknown,
+  deadline: number,
+  { codeCheck = false }: { codeCheck?: boolean } = {},
+): Promise<string> {
+  const { response, text } = await appleFetch(`${APPLE_AUTH_BASE}${path}`, {
     method,
-    headers,
+    headers: authHeaders(session),
     body: body === undefined ? undefined : JSON.stringify(body),
     redirect: 'manual',
-    signal: AbortSignal.timeout(AUTH_TIMEOUT_MS),
-  })
-  const text = await response.text()
+  }, deadline)
   captureHeaders(session, response.headers)
-  if (response.status === 409 && allowConflict) return { status: response.status, text }
-  if (!response.ok) {
-    const lower = text.toLowerCase()
-    const code = response.status === 401 || response.status === 403 || response.status === 419
-      || lower.includes('authentication_failed') ? APPLE_ACCOUNT_ERROR_CODES.auth : APPLE_ACCOUNT_ERROR_CODES.api
-    throw new ICloudRemoteError(
-      code === APPLE_ACCOUNT_ERROR_CODES.auth ? 422 : 502,
-      code === APPLE_ACCOUNT_ERROR_CODES.auth ? 'Apple ID 或密码错误，或管理态登录已失效。' : `Apple 登录请求失败（HTTP ${response.status}）。`,
-      true,
-      code,
-    )
-  }
-  return { status: response.status, text }
+  if (!response.ok) throw signInError(response.status, text, codeCheck)
+  return text
 }
 
-async function primeManageState(session: PendingAuthState): Promise<void> {
+async function primeManageState(session: PendingAppleSignIn, deadline: number): Promise<void> {
   for (const path of ['/account/manage/section/privacy', '/bootstrap/portal']) {
-    const response = await fetch(`${APPLE_ACCOUNT_ORIGIN}${path}`, {
+    const { response } = await appleFetch(`${APPLE_ACCOUNT_ORIGIN}${path}`, {
       headers: {
         Accept: path === '/bootstrap/portal' ? 'application/json, text/plain, */*' : 'text/html,application/xhtml+xml',
-        Referer: `${APPLE_ACCOUNT_ORIGIN}/`, 'User-Agent': APPLE_ACCOUNT_UA,
+        Referer: `${APPLE_ACCOUNT_ORIGIN}/`, 'User-Agent': APPLE_ACCOUNT_USER_AGENT,
         'X-Apple-I-Request-Context': 'ca', 'X-Apple-I-TimeZone': 'Asia/Shanghai',
-        Cookie: cookieHeader(session.cookies),
+        Cookie: appleAccountCookieHeader(session.cookies),
       },
-      redirect: 'follow', signal: AbortSignal.timeout(AUTH_TIMEOUT_MS),
-    })
-    const text = await response.text()
+      redirect: 'follow',
+    }, deadline)
     captureHeaders(session, response.headers)
     if (!response.ok && response.status !== 404) {
-      throw new ICloudRemoteError(502, `Apple Account 登录预热失败（HTTP ${response.status}）。`, true, APPLE_ACCOUNT_ERROR_CODES.api)
-    }
-    if (path === '/bootstrap/portal' && text.trim()) {
-      const portal = parseJson(text)
-      const timeout = Number(portal.timeOutInterval)
-      if (Number.isFinite(timeout) && timeout > 0) session.hcBits = Math.max(session.hcBits, 0)
+      throw new ICloudRemoteError(502, 'Apple Account 登录预热失败。', true, APPLE_ACCOUNT_ERROR_CODES.api, `HTTP ${response.status}`)
     }
   }
-  const token = await fetch('https://appleid.apple.com/account/manage/gs/ws/token', {
+  const { response: token } = await appleFetch('https://appleid.apple.com/account/manage/gs/ws/token', {
     headers: { ...Object.fromEntries(authHeaders(session).entries()), Accept: 'application/json' },
-    redirect: 'follow', signal: AbortSignal.timeout(AUTH_TIMEOUT_MS),
-  })
-  await token.text(); captureHeaders(session, token.headers)
+    redirect: 'follow',
+  }, deadline)
+  captureHeaders(session, token.headers)
   if (!token.ok && token.status !== 404) {
-    throw new ICloudRemoteError(502, `Apple Account 管理态预热失败（HTTP ${token.status}）。`, true, APPLE_ACCOUNT_ERROR_CODES.api)
+    throw new ICloudRemoteError(502, 'Apple Account 管理态预热失败。', true, APPLE_ACCOUNT_ERROR_CODES.api, `HTTP ${token.status}`)
   }
 }
 
-const SRP_N = BigInt(`0x${
-  'AC6BDB41324A9A9BF166DE5E1389582FAF72B6651987EE07FC3192943DB56050'
-  + 'A37329CBB4A099ED8193E0757767A13DD52312AB4B03310DCD7F48A9DA04FD50'
-  + 'E8083969EDB767B0CF6095179A163AB3661A05FBD5FAAAE82918A9962F0B93B8'
-  + '55F97993EC975EEAA80D740ADBF4FF747359D041D5C33EA71D281E446B14773B'
-  + 'CA97B43A23FB801676BD207A436C6481F1D2B9078717461A5B9D32E688F87748'
-  + '544523B524B0D57D5EA77A2775D2ECFA032CFBDBF52FB3786160279004E57AE'
-  + '6AF874E7303CE53299CCC041C7BC308D82A5698F3A8D0C38271AE35F8E9DBFB'
-  + 'B694B5C803D89F7AE435DE236D525F54759B65E372FCD68EF20FA7111F9E4AFF73'
-}`)
-const SRP_G = 2n
-const SRP_BYTES = 256
-
-function pad(value: bigint): Uint8Array {
-  let hex = value.toString(16)
-  if (hex.length % 2) hex = `0${hex}`
-  const bytes = Uint8Array.from(hex.match(/.{2}/g)?.map((part) => Number.parseInt(part, 16)) || [])
-  const output = new Uint8Array(SRP_BYTES)
-  output.set(bytes.slice(-SRP_BYTES), SRP_BYTES - Math.min(SRP_BYTES, bytes.length))
-  return output
-}
-
-function concat(...parts: Uint8Array[]): Uint8Array {
-  const output = new Uint8Array(parts.reduce((total, part) => total + part.length, 0))
-  let offset = 0
-  for (const part of parts) { output.set(part, offset); offset += part.length }
-  return output
-}
-
-async function sha256(...parts: Uint8Array[]): Promise<Uint8Array> {
-  return new Uint8Array(await crypto.subtle.digest('SHA-256', concat(...parts)))
-}
-
-function hexBytes(value: string): Uint8Array {
-  const normalized = value.replace(/^0x/i, '').padStart(value.length % 2 ? value.length + 1 : value.length, '0')
-  return Uint8Array.from(normalized.match(/.{2}/g)?.map((part) => Number.parseInt(part, 16)) || [])
-}
-
-function base64Bytes(value: string): Uint8Array {
-  return Uint8Array.from(atob(value), (character) => character.charCodeAt(0))
-}
-
-function base64(value: Uint8Array): string {
-  let text = ''
-  for (const byte of value) text += String.fromCharCode(byte)
-  return btoa(text)
-}
-
-function hex(value: Uint8Array): string {
-  return Array.from(value).map((byte) => byte.toString(16).padStart(2, '0')).join('')
-}
-
-function modPow(base: bigint, exponent: bigint, modulus: bigint): bigint {
-  let result = 1n
-  let factor = ((base % modulus) + modulus) % modulus
-  let power = exponent
-  while (power > 0n) {
-    if (power & 1n) result = (result * factor) % modulus
-    factor = (factor * factor) % modulus
-    power >>= 1n
-  }
-  return result
-}
-
-function srpSecret(): Uint8Array {
-  return crypto.getRandomValues(new Uint8Array(32))
-}
-
-function srpPublic(secret: Uint8Array): Uint8Array {
-  const a = BigInt(`0x${hex(secret)}`)
-  return pad(modPow(SRP_G, a, SRP_N))
-}
-
-async function srpProof(appleId: string, password: string, response: Record<string, unknown>, secret: Uint8Array): Promise<{ m1: string; m2: string }> {
-  const salt = base64Bytes(safeString(response.salt))
-  const serverB = BigInt(`0x${Array.from(base64Bytes(safeString(response.b))).map((byte) => byte.toString(16).padStart(2, '0')).join('')}`)
-  if (!salt.length || !serverB || serverB >= SRP_N) throw new ICloudRemoteError(502, 'Apple SRP 挑战参数无效。', true, APPLE_ACCOUNT_ERROR_CODES.api)
-  const a = BigInt(`0x${Array.from(secret).map((byte) => byte.toString(16).padStart(2, '0')).join('')}`)
-  const A = modPow(SRP_G, a, SRP_N)
-  const nBytes = hexBytes(SRP_N.toString(16))
-  const k = BigInt(`0x${Array.from(await sha256(nBytes, pad(SRP_G))).map((byte) => byte.toString(16).padStart(2, '0')).join('')}`)
-  const passHash = await sha256(new TextEncoder().encode(password))
-  const protocol = safeString(response.protocol) || 's2k'
-  const passwordInput = protocol === 's2k_fo' ? new TextEncoder().encode(hex(passHash)) : passHash
-  const key = await crypto.subtle.importKey('raw', passwordInput, 'PBKDF2', false, ['deriveBits'])
-  const iterations = Number(response.iteration)
-  if (!Number.isSafeInteger(iterations) || iterations < 1) {
-    throw new ICloudRemoteError(502, 'Apple SRP 迭代参数无效。', true, APPLE_ACCOUNT_ERROR_CODES.api)
-  }
-  const derived = new Uint8Array(await crypto.subtle.deriveBits(
-    { name: 'PBKDF2', hash: 'SHA-256', salt, iterations }, key, 256,
-  ))
-  const inner = await sha256(concat(new TextEncoder().encode(':'), derived))
-  const x = BigInt(`0x${Array.from(await sha256(salt, inner)).map((byte) => byte.toString(16).padStart(2, '0')).join('')}`)
-  const u = BigInt(`0x${Array.from(await sha256(pad(A), pad(serverB))).map((byte) => byte.toString(16).padStart(2, '0')).join('')}`)
-  const gx = modPow(SRP_G, x, SRP_N)
-  const base = ((serverB - k * gx) % SRP_N + SRP_N) % SRP_N
-  const shared = modPow(base, a + u * x, SRP_N)
-  const sessionKey = await sha256(pad(shared))
-  const hG = await sha256(pad(SRP_G))
-  const hN = await sha256(nBytes)
-  const xor = hG.map((byte, index) => byte ^ hN[index])
-  const m1 = await sha256(xor, await sha256(new TextEncoder().encode(appleId)), salt, pad(A), pad(serverB), sessionKey)
-  const m2 = await sha256(pad(A), m1, sessionKey)
-  return { m1: base64(m1), m2: base64(m2) }
+async function openSignInFrame(session: PendingAppleSignIn, deadline: number): Promise<void> {
+  const frame = frameTag(session.frameId)
+  const authorize = new URL(`${APPLE_AUTH_BASE}/authorize/signin`)
+  authorize.search = new URLSearchParams({
+    frame_id: frame, skVersion: '7', iframeId: frame, client_id: APPLE_ACCOUNT_CLIENT_ID,
+    redirect_uri: APPLE_ACCOUNT_ORIGIN, response_type: 'code', response_mode: 'web_message',
+    state: frame, authVersion: '8.0.2',
+  }).toString()
+  const { response } = await appleFetch(authorize.toString(), {
+    headers: { Accept: 'text/html,*/*', 'User-Agent': APPLE_ACCOUNT_USER_AGENT }, redirect: 'follow',
+  }, deadline)
+  captureHeaders(session, response.headers)
 }
 
 async function hashcash(bits: number, challenge: string): Promise<string> {
@@ -298,19 +259,121 @@ async function hashcash(bits: number, challenge: string): Promise<string> {
   throw new ICloudRemoteError(502, 'Apple Account 动态验证生成失败，请稍后重试。', true, APPLE_ACCOUNT_ERROR_CODES.api)
 }
 
-function parseJson(text: string): Record<string, unknown> {
-  try {
-    const value = JSON.parse(text) as unknown
-    return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
-  } catch { return {} }
+/** True when Apple wants a verification code before it lets the session in. */
+async function completeSignIn(
+  session: PendingAppleSignIn,
+  proof: { m1: string; m2: string },
+  c: unknown,
+  deadline: number,
+): Promise<boolean> {
+  const hc = await hashcash(session.hcBits, session.hcChallenge)
+  const headers = authHeaders(session)
+  if (hc) headers.set('X-Apple-HC', hc)
+  const { response, text } = await appleFetch(`${APPLE_AUTH_BASE}/signin/complete?isRememberMeEnabled=true`, {
+    method: 'POST', headers, redirect: 'follow',
+    body: JSON.stringify({ accountName: session.appleId, m1: proof.m1, m2: proof.m2, c, rememberMe: true }),
+  }, deadline)
+  captureHeaders(session, response.headers)
+  if (response.status === 409) return true
+  if (response.ok) return false
+  throw response.status === 401 || response.status === 403
+    ? new ICloudRemoteError(422, 'Apple ID 或密码错误。', true, APPLE_ACCOUNT_ERROR_CODES.auth, appleReason(response.status, text))
+    : new ICloudRemoteError(502, 'Apple Account 登录失败。', true, APPLE_ACCOUNT_ERROR_CODES.api, appleReason(response.status, text))
 }
 
-function stateFromPending(session: PendingAuthState): AppleAccountState {
+function trustedPhones(value: unknown): TrustedPhone[] {
+  if (!Array.isArray(value)) return []
+  return value.flatMap((entry) => {
+    const phone = (entry && typeof entry === 'object' ? entry : {}) as Record<string, unknown>
+    const id = Number(phone.id)
+    if (!Number.isSafeInteger(id) || id < 0) return []
+    return [{ id, number: safeString(phone.obfuscatedNumber, 64) || safeString(phone.numberWithDialCode, 64) }]
+  }).slice(0, 10)
+}
+
+/**
+ * Learn where Apple can send the code: the trusted phones it can text, and
+ * whether any trusted device can take a push. Without the list the push is
+ * still worth trying, so failing here only costs the SMS fallback — unless
+ * Apple has rejected the session outright.
+ */
+async function twoFactorOptions(session: PendingAppleSignIn, deadline: number): Promise<{ noTrustedDevices: boolean }> {
+  try {
+    const data = parseJson(await appleRequest(session, 'GET', '', undefined, deadline))
+    session.phones = trustedPhones(data.trustedPhoneNumbers)
+    return { noTrustedDevices: data.noTrustedDevices === true }
+  } catch (error) {
+    if (authFailure(error)) throw error
+    return { noTrustedDevices: false }
+  }
+}
+
+function noTrustedPhone(): ICloudRemoteError {
+  return new ICloudRemoteError(502, 'Apple 没有返回可接收验证码的受信任手机号。', true, APPLE_ACCOUNT_ERROR_CODES.api)
+}
+
+async function sendSms(session: PendingAppleSignIn, phoneId: number, deadline: number): Promise<void> {
+  await appleRequest(session, 'PUT', '/verify/phone', { phoneNumber: { id: phoneId }, mode: 'sms' }, deadline)
+  session.twoFactorMethod = 'phone'
+  session.phoneId = phoneId
+}
+
+/**
+ * Send the code the way the user asked, falling back to SMS when no trusted
+ * device takes it. A failed push is never reported as sent: an Apple ID that
+ * only has a phone would wait for a code that is not coming.
+ */
+async function deliverCode(session: PendingAppleSignIn, noTrustedDevices: boolean, deadline: number): Promise<void> {
+  const phone = session.phones[0]
+  if (session.twoFactorMethod === 'trusted_device' && !noTrustedDevices) {
+    try {
+      await appleRequest(session, 'PUT', '/verify/trusteddevice/securitycode', undefined, deadline)
+      return
+    } catch (error) {
+      if (!phone || authFailure(error)) throw error
+    }
+  }
+  if (!phone) throw noTrustedPhone()
+  await sendSms(session, phone.id, deadline)
+}
+
+function twoFactorBody(challengeId: string, expiresAt: number, session: PendingAppleSignIn) {
+  return {
+    needs2FA: true,
+    challengeId,
+    expiresAt: new Date(expiresAt * 1000).toISOString(),
+    method: session.twoFactorMethod,
+    phones: session.phones,
+    ...(session.phoneId ? { phoneId: session.phoneId } : {}),
+  }
+}
+
+function stateFromPending(session: PendingAppleSignIn): AppleAccountState {
   return {
     cookies: { ...session.cookies }, scnt: session.scnt, sessionId: session.sessionId,
-    apiKey: '', expiresAt: '', lastCheckedAt: '', userAgent: APPLE_ACCOUNT_UA,
-    host: 'appleid.apple.com', origin: APPLE_ACCOUNT_ORIGIN,
+    apiKey: '', expiresAt: '', lastCheckedAt: '', userAgent: APPLE_ACCOUNT_USER_AGENT,
+    host: 'appleid.apple.com', origin: APPLE_ACCOUNT_ORIGIN, appleId: session.appleId,
   }
+}
+
+/** Trade the signed-in session for a management one, store it, and record who did it from where. */
+async function finishSignIn(
+  context: SignInContext,
+  session: PendingAppleSignIn,
+  via: 'password' | 'two_factor',
+): Promise<Response> {
+  const { env, user, store, account, ip } = context
+  const client = new AppleAccountClient(stateFromPending(session))
+  await client.refresh()
+  Object.assign(account, {
+    appleAccountState: client.state, appleAccountExpiresAt: client.state.expiresAt, ...ACTIVE_APPLE_SESSION,
+  })
+  await store.saveAppleAccountState(account)
+  await promoteAppleOnly(store, account)
+  await writeAudit(env, user.id, 'icloud.credentials.apple_account', account.id, ip, {
+    accountName: account.name, appleAccountHost: client.state.host, signIn: via,
+  })
+  return Response.json({ needs2FA: false, account: publicICloudAccount(account) })
 }
 
 function tooManyAppleLogins(retryAfter: number): Response {
@@ -320,94 +383,123 @@ function tooManyAppleLogins(retryAfter: number): Response {
   )
 }
 
+function loginErrorResponse(error: unknown): Response {
+  return iCloudErrorResponse(error, 'Apple Account sign-in failed', 'Apple Account 登录暂时失败。')
+}
+
+async function signIn(context: SignInContext, appleId: string, password: string, method: TwoFactorMethod): Promise<Response> {
+  const { env, user, account } = context
+  const deadline = Date.now() + SIGN_IN_BUDGET_MS
+  const session: PendingAppleSignIn = {
+    appleId, frameId: crypto.randomUUID().replaceAll('-', ''), cookies: {}, scnt: '', sessionId: '',
+    authAttributes: '', hcBits: 0, hcChallenge: '', twoFactorMethod: method, phoneId: 0, phones: [],
+  }
+  await primeManageState(session, deadline)
+  await openSignInFrame(session, deadline)
+  await appleRequest(session, 'POST', '/verify/device/key/challenge', { passkeyAutofill: false }, deadline)
+  await appleRequest(session, 'POST', '/federate?isRememberMeEnabled=true', { accountName: appleId, rememberMe: true }, deadline)
+  // Charged here, right before the SRP round that counts toward the Apple
+  // ID's lockout: warm-up failures above never reach it. The check up front
+  // already refused a spent allowance; this catches attempts that raced it.
+  const limit = await consumeAppleAccountLoginRateLimit(env.DB, user.id, appleId)
+  if (!limit.allowed) return tooManyAppleLogins(limit.retryAfter)
+  const secret = srpSecret()
+  const init = parseJson(await appleRequest(session, 'POST', '/signin/init', {
+    a: srpBase64(srpPublic(secret)), accountName: appleId, protocols: ['s2k', 's2k_fo'],
+  }, deadline))
+  const proof = await srpProof(appleId, password, {
+    salt: safeString(init.salt), b: safeString(init.b), iteration: Number(init.iteration),
+    protocol: safeString(init.protocol) || 's2k',
+  }, secret)
+  if (!await completeSignIn(session, proof, init.c, deadline)) return finishSignIn(context, session, 'password')
+  const { noTrustedDevices } = await twoFactorOptions(session, deadline)
+  await deliverCode(session, noTrustedDevices, deadline)
+  const { id, expiresAt } = await new AppleLoginChallenges(env, user.id, account.id).open(session)
+  return Response.json(twoFactorBody(id, expiresAt, session))
+}
+
 export async function startAppleAccountLogin(
   env: Env,
   user: SessionUser,
   accountId: string,
   request: Request,
+  ip: string,
+  defer: Defer,
 ): Promise<Response> {
   try {
-    const body = await request.json<Record<string, unknown>>()
+    const body = await jsonBody(request)
     const appleId = safeString(body.appleId, 254).toLowerCase()
     const password = safeString(body.password, 256)
-    const method = body.twoFactorMethod === 'phone' ? 'phone' : 'trusted_device'
     if (!appleId || !password) throw new ICloudStoreError(400, '请填写 Apple ID 和密码。')
-    const store = new ICloudAccountStore(env, user.id)
-    await store.get(accountId)
+    // Refused before anything is decrypted or sent to Apple.
     const precheck = await checkAppleAccountLoginRateLimit(env.DB, user.id, appleId)
     if (!precheck.allowed) return tooManyAppleLogins(precheck.retryAfter)
-    const session: PendingAuthState = {
-      appleId, frameId: crypto.randomUUID().replaceAll('-', ''), cookies: {}, scnt: '', sessionId: '',
-      authAttributes: '', hcBits: 0, hcChallenge: '', twoFactorMethod: method,
-    }
-    await primeManageState(session)
-    const frame = frameTag(session.frameId)
-    const authorize = new URL(`${APPLE_AUTH_BASE}/authorize/signin`)
-    authorize.search = new URLSearchParams({
-      frame_id: frame, skVersion: '7', iframeId: frame, client_id: APPLE_ACCOUNT_CLIENT_ID,
-      redirect_uri: APPLE_ACCOUNT_ORIGIN, response_type: 'code', response_mode: 'web_message',
-      state: frame, authVersion: '8.0.2',
-    }).toString()
-    const first = await fetch(authorize, { headers: { Accept: 'text/html,*/*', 'User-Agent': APPLE_ACCOUNT_UA }, redirect: 'follow', signal: AbortSignal.timeout(AUTH_TIMEOUT_MS) })
-    captureHeaders(session, first.headers)
-    await first.text()
-    await appleRequest(session, 'POST', '/verify/device/key/challenge', { passkeyAutofill: false })
-    await appleRequest(session, 'POST', '/federate?isRememberMeEnabled=true', { accountName: appleId, rememberMe: true })
-    // Charged here, right before the SRP round that counts toward the Apple
-    // ID's lockout: warm-up failures above never reach it. The check up front
-    // already refused a spent allowance; this catches attempts that raced it.
-    const limit = await consumeAppleAccountLoginRateLimit(env.DB, user.id, appleId)
-    if (!limit.allowed) return tooManyAppleLogins(limit.retryAfter)
-    const secret = srpSecret()
-    const init = await appleRequest(session, 'POST', '/signin/init', {
-      a: base64(srpPublic(secret)),
-      accountName: appleId, protocols: ['s2k', 's2k_fo'],
-    })
-    const challenge = parseJson(init.text)
-    const proof = await srpProof(appleId, password, challenge, secret)
-    const hc = await hashcash(session.hcBits, session.hcChallenge)
-    const completeBody: Record<string, unknown> = {
-      accountName: appleId, m1: proof.m1, m2: proof.m2, c: challenge.c, rememberMe: true,
-    }
-    const completeHeaders = authHeaders(session)
-    if (hc) completeHeaders.set('X-Apple-HC', hc)
-    const complete = await fetch(`${APPLE_AUTH_BASE}/signin/complete?isRememberMeEnabled=true`, {
-      method: 'POST', headers: completeHeaders, body: JSON.stringify(completeBody), redirect: 'follow', signal: AbortSignal.timeout(AUTH_TIMEOUT_MS),
-    })
-    await complete.text(); captureHeaders(session, complete.headers)
-    if (complete.status === 409) {
-      if (method === 'trusted_device') {
-        await appleRequest(session, 'PUT', '/verify/trusteddevice/securitycode').catch(() => undefined)
-      } else {
-        await appleRequest(session, 'PUT', '/verify/phone', {
-          phoneNumber: { id: 1 }, mode: 'sms',
-        }).catch(() => undefined)
-      }
-      const challengeId = crypto.randomUUID()
-      const now = Math.floor(Date.now() / 1000)
-      await env.DB.prepare(
-        'DELETE FROM icloud_auth_challenges WHERE user_id = ? AND (expires_at <= ? OR account_id = ?)',
-      ).bind(user.id, now, accountId).run()
-      const cipher = await encryptICloudSecret(env, JSON.stringify(session), `${user.id}:${accountId}:apple-auth:${challengeId}`)
-      await env.DB.prepare(
-        `INSERT INTO icloud_auth_challenges (id, user_id, account_id, state_cipher, expires_at, attempts, created_at)
-         VALUES (?, ?, ?, ?, ?, 0, ?)`,
-      ).bind(challengeId, user.id, accountId, cipher, now + CHALLENGE_TTL_SECONDS, now).run()
-      return Response.json({ needs2FA: true, challengeId, expiresAt: new Date((now + CHALLENGE_TTL_SECONDS) * 1000).toISOString(), message: method === 'phone' ? '验证码已发送到受信任手机号。' : '请在受信任设备上确认并输入验证码。' })
-    }
-    if (!complete.ok) throw new ICloudRemoteError(422, 'Apple Account 登录失败。', true, APPLE_ACCOUNT_ERROR_CODES.auth)
+    const store = new ICloudAccountStore(env, user.id)
     const account = await store.get(accountId)
-    const client = new AppleAccountClient(stateFromPending(session))
-    await client.refresh()
-    account.appleAccountState = client.state
-    account.appleAccountStatus = 'active'; account.appleAccountExpiresAt = client.state.expiresAt; account.appleAccountError = ''
-    await store.saveAppleAccountState(account)
-    return Response.json({ needs2FA: false, account: publicICloudAccount(account) })
+    await assertAppleIdBindable(store, account, appleId)
+    const method: TwoFactorMethod = body.twoFactorMethod === 'phone' ? 'phone' : 'trusted_device'
+    return await outlive(defer, signIn({ env, user, store, account, ip }, appleId, password, method))
   } catch (error) {
-    if (error instanceof SyntaxError) return Response.json({ error: '请求体必须是 JSON 对象。' }, { status: 400 })
-    if (error instanceof ICloudStoreError || error instanceof ICloudRemoteError) return Response.json({ error: error.message }, { status: error.status })
-    console.error('Apple Account login failed', error)
-    return Response.json({ error: 'Apple Account 登录暂时失败。' }, { status: 502 })
+    return loginErrorResponse(error)
+  }
+}
+
+/** Once a challenge can no longer be answered, whatever went wrong also tells the client to start over. */
+function spentChallenge(error: unknown): ICloudStoreError {
+  if (error instanceof ICloudStoreError || error instanceof ICloudRemoteError) {
+    return new ICloudStoreError(error.status, error.message, error.detail, APPLE_LOGIN_CHALLENGE_GONE)
+  }
+  console.error('Apple Account sign-in failed after Apple accepted the code', error)
+  return new ICloudStoreError(500, 'Apple Account 登录暂时失败。', '', APPLE_LOGIN_CHALLENGE_GONE)
+}
+
+/**
+ * After a refused attempt, keep what Apple rotated for the next one, or drop
+ * the challenge once its attempts are spent. Returns the error to report.
+ */
+async function afterFailedAttempt(
+  challenges: AppleLoginChallenges,
+  challengeId: string,
+  claimed: ClaimedChallenge,
+  error: unknown,
+): Promise<unknown> {
+  const last = claimed.attempts >= CHALLENGE_MAX_ATTEMPTS
+  try {
+    if (last) await challenges.close(challengeId)
+    else await challenges.save(challengeId, claimed.state)
+  } catch (storeError) {
+    console.error('Apple sign-in challenge could not be updated', storeError)
+  }
+  return last ? appleLoginChallengeGone(true) : error
+}
+
+async function verifyCode(
+  context: SignInContext,
+  challenges: AppleLoginChallenges,
+  challengeId: string,
+  claimed: ClaimedChallenge,
+  code: string,
+): Promise<Response> {
+  const session = claimed.state
+  const deadline = Date.now() + SIGN_IN_BUDGET_MS
+  const bySms = session.twoFactorMethod === 'phone'
+  try {
+    await appleRequest(
+      session, 'POST',
+      bySms ? '/verify/phone/securitycode' : '/verify/trusteddevice/securitycode',
+      bySms ? { phoneNumber: { id: session.phoneId }, securityCode: { code }, mode: 'sms' } : { securityCode: { code } },
+      deadline, { codeCheck: true },
+    )
+  } catch (error) {
+    throw await afterFailedAttempt(challenges, challengeId, claimed, error)
+  }
+  // Apple has taken the code: whatever happens next, it cannot be answered again.
+  await challenges.close(challengeId).catch((error) => console.error('Apple sign-in challenge could not be closed', error))
+  try {
+    await appleRequest(session, 'GET', '/2sv/trust', undefined, deadline)
+    return await finishSignIn(context, session, 'two_factor')
+  } catch (error) {
+    throw spentChallenge(error)
   }
 }
 
@@ -416,39 +508,66 @@ export async function submitAppleAccountLogin2FA(
   user: SessionUser,
   accountId: string,
   request: Request,
+  ip: string,
+  defer: Defer,
 ): Promise<Response> {
   try {
-    const body = await request.json<Record<string, unknown>>()
+    const body = await jsonBody(request)
     const challengeId = safeString(body.challengeId, 128)
     const code = safeString(body.code, 6)
     if (!challengeId || !/^\d{6}$/.test(code)) throw new ICloudStoreError(400, '请输入 6 位验证码。')
-    const row = await env.DB.prepare(
-      `SELECT state_cipher, expires_at, attempts FROM icloud_auth_challenges
-       WHERE id = ? AND user_id = ? AND account_id = ? LIMIT 1`,
-    ).bind(challengeId, user.id, accountId).first<{ state_cipher: string; expires_at: number; attempts: number }>()
-    const now = Math.floor(Date.now() / 1000)
-    if (!row || row.expires_at <= now) throw new ICloudStoreError(400, '登录挑战已过期，请重新开始。')
-    if (row.attempts >= CHALLENGE_MAX_ATTEMPTS) throw new ICloudStoreError(429, '验证码尝试次数过多，请重新开始登录。')
-    const session = JSON.parse(await decryptICloudSecret(env, row.state_cipher, `${user.id}:${accountId}:apple-auth:${challengeId}`)) as PendingAuthState
-    await env.DB.prepare('UPDATE icloud_auth_challenges SET attempts = attempts + 1 WHERE id = ?').bind(challengeId).run()
-    const bodyPayload = session.twoFactorMethod === 'phone'
-      ? { phoneNumber: { id: 1 }, securityCode: { code }, mode: 'sms' }
-      : { securityCode: { code } }
-    const path = session.twoFactorMethod === 'phone' ? '/verify/phone/securitycode' : '/verify/trusteddevice/securitycode'
-    await appleRequest(session, 'POST', path, bodyPayload)
-    await appleRequest(session, 'GET', '/2sv/trust')
+    const challenges = new AppleLoginChallenges(env, user.id, accountId)
+    const claimed = await challenges.claim(challengeId)
     const store = new ICloudAccountStore(env, user.id)
     const account = await store.get(accountId)
-    const client = new AppleAccountClient(stateFromPending(session))
-    await client.refresh()
-    account.appleAccountState = client.state
-    account.appleAccountStatus = 'active'; account.appleAccountExpiresAt = client.state.expiresAt; account.appleAccountError = ''
-    await store.saveAppleAccountState(account)
-    await env.DB.prepare('DELETE FROM icloud_auth_challenges WHERE id = ?').bind(challengeId).run()
-    return Response.json({ needs2FA: false, account: publicICloudAccount(account) })
+    // The account may have taken another Apple ID while the code was on its way.
+    await assertAppleIdBindable(store, account, claimed.state.appleId)
+    return await outlive(defer, verifyCode({ env, user, store, account, ip }, challenges, challengeId, claimed, code))
   } catch (error) {
-    if (error instanceof ICloudStoreError || error instanceof ICloudRemoteError) return Response.json({ error: error.message }, { status: error.status })
-    console.error('Apple Account 2FA failed', error)
-    return Response.json({ error: 'Apple Account 验证失败。' }, { status: 422 })
+    return loginErrorResponse(error)
+  }
+}
+
+/** Switch a sign-in waiting for its code to SMS, on the trusted phone the user picked. */
+export async function sendAppleAccountLoginSms(
+  env: Env,
+  user: SessionUser,
+  accountId: string,
+  request: Request,
+  defer: Defer,
+): Promise<Response> {
+  try {
+    const body = await jsonBody(request)
+    const challengeId = safeString(body.challengeId, 128)
+    const phoneId = body.phoneId === undefined ? undefined : Number(body.phoneId)
+    if (phoneId !== undefined && !Number.isSafeInteger(phoneId)) {
+      throw new ICloudStoreError(400, '请选择 Apple 返回的受信任手机号。')
+    }
+    if (!challengeId) throw appleLoginChallengeGone(false)
+    const challenges = new AppleLoginChallenges(env, user.id, accountId)
+    const claimed = await challenges.claim(challengeId)
+    // Sending a code on the last attempt would leave none to enter it with.
+    if (claimed.attempts >= CHALLENGE_MAX_ATTEMPTS) {
+      await challenges.close(challengeId)
+      throw appleLoginChallengeGone(true)
+    }
+    const session = claimed.state
+    if (!session.phones.length) throw noTrustedPhone()
+    const phone = phoneId === undefined ? session.phones[0] : session.phones.find((entry) => entry.id === phoneId)
+    if (!phone) throw new ICloudStoreError(400, '请选择 Apple 返回的受信任手机号。')
+    return await outlive(defer, (async () => {
+      try {
+        await sendSms(session, phone.id, Date.now() + SIGN_IN_BUDGET_MS)
+      } catch (error) {
+        await challenges.save(challengeId, session).catch(() => undefined)
+        throw error
+      }
+      // Unlike after a refusal, this write has to land: the code is on its way
+      // by SMS, and only a challenge that says so submits it to the SMS check.
+      await challenges.save(challengeId, session)
+      return Response.json(twoFactorBody(challengeId, claimed.expiresAt, session))
+    })())
+  } catch (error) {
+    return loginErrorResponse(error)
   }
 }

@@ -1,6 +1,7 @@
 import { Copy, LoaderCircle, MailPlus, SendToBack } from 'lucide-react'
 import type { ICloudAccount, ICloudAlias, ManagedDomain, MessageSummary } from '../../src/shared/api/api-types'
 import type { MailSourceDescriptor, MailSourceId } from './mail-source'
+import type { ICloudAliasUnavailableReason } from './icloud-accounts'
 import { t, useLocale } from '../../src/shared/i18n'
 import { PanelICloudGenerate } from './PanelICloudGenerate'
 import { PanelConnectedAddresses } from './PanelConnectedAddresses'
@@ -25,6 +26,7 @@ interface Props {
   iCloudLoadingAccounts: boolean
   iCloudLoadingAliases: boolean
   iCloudSelectedAlias: string
+  iCloudUnavailableReason: ICloudAliasUnavailableReason | null
   localPart: string
   mailLoading: boolean
   messages: MessageSummary[]
@@ -107,6 +109,7 @@ export function GenerateView(props: Props) {
             authorized={props.iCloudAuthorized} accounts={props.iCloudAccounts}
             accountId={props.iCloudAccountId} aliases={props.iCloudAliases}
             selectedAlias={props.iCloudSelectedAlias} busy={props.iCloudBusy}
+            unavailableReason={props.iCloudUnavailableReason}
             creating={props.iCloudCreating} loadingAccounts={props.iCloudLoadingAccounts}
             loadingAliases={props.iCloudLoadingAliases} onAccount={props.onICloudAccount}
             onAlias={props.onICloudAlias} onGenerate={props.onICloudGenerate}
